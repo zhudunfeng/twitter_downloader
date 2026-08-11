@@ -12,7 +12,7 @@ import requests
 from PIL import Image
 
 _URL_RE = re.compile(
-    r"^https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/]+/status/\d+(?:\?.*)?$"
+    r"^https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/]+/status/\d+(?:/[^/?#]+)*(?:[?#].*)?$"
 )
 
 

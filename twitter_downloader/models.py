@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 
-
-@dataclass
 class MediaType:
     IMAGE = "image"
     VIDEO = "video"
@@ -39,6 +36,7 @@ class TweetInfo:
         "created_at",
         "text",
         "article_blocks",
+        "article_urls",
         "media",
         "like_count",
         "retweet_count",
@@ -51,14 +49,15 @@ class TweetInfo:
         tweet_id: str,
         url: str,
         author: "User",
-        created_at = None,
+        created_at=None,
         text: str = "",
         article_blocks: list["ArticleBlock"] | None = None,
+        article_urls: list[str] | None = None,
         media: list[MediaItem] | None = None,
         like_count: int | None = None,
         retweet_count: int | None = None,
         reply_count: int | None = None,
-        raw_info = None,
+        raw_info=None,
     ) -> None:
         self.tweet_id = tweet_id
         self.url = url
@@ -66,6 +65,7 @@ class TweetInfo:
         self.created_at = created_at
         self.text = text
         self.article_blocks = article_blocks or []
+        self.article_urls = article_urls or []
         self.media = media or []
         self.like_count = like_count
         self.retweet_count = retweet_count
@@ -88,8 +88,14 @@ class ArticleBlock:
 
 
 class User:
-    __slots__ = ("username", "display_name")
+    __slots__ = ("username", "display_name", "user_id")
 
-    def __init__(self, username: str, display_name: str | None = None) -> None:
+    def __init__(
+        self,
+        username: str,
+        display_name: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
         self.username = username
         self.display_name = display_name
+        self.user_id = user_id

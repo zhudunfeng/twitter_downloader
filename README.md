@@ -28,6 +28,7 @@ D:\adunsoftware\python\python3.14.4\python.exe -m pip install rich click
 
 ```bash
 D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader <URL>
+>D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader single https://x.com/Fn_dapty/status/2087064228775460908/video/1 --verbose
 ```
 
 ## 输出目录结构
