@@ -1,3 +1,5 @@
 .codegraph
 .reasonix
 reasonix.toml
+.idea
+__pycache__
