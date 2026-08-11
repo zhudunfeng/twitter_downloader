@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from os import unlink
+from tempfile import NamedTemporaryFile
+from unittest.mock import patch
 
+from click.testing import CliRunner
+
+from twitter_downloader.cli import MediaDownloader, app
 from twitter_downloader.downloader import Downloader
 from twitter_downloader.extractor import YtDlpTweetExtractor
 from twitter_downloader.models import TweetInfo, User
@@ -59,6 +65,36 @@ class DownloadFlowTests(unittest.TestCase):
     def test_downloader_enforces_the_eight_worker_limit(self) -> None:
         with self.assertRaises(ValueError):
             Downloader(max_workers=9)
+
+    def test_batch_skips_comments_and_duplicates_and_collects_failures(self) -> None:
+        good_url = "https://x.com/alice/status/123"
+        failing_url = "https://x.com/bob/status/456"
+        client = MediaDownloader()
+
+        with patch.object(
+            client,
+            "download",
+            side_effect=["downloads/alice/20260811/123", RuntimeError("private post")],
+        ) as download:
+            result = client.batch(["# source", "", good_url, good_url, failing_url])
+
+        self.assertEqual(result.destinations, ["downloads/alice/20260811/123"])
+        self.assertEqual([(failure.url, failure.error) for failure in result.failures], [(failing_url, "private post")])
+        self.assertEqual(download.call_count, 2)
+
+    def test_batch_command_returns_nonzero_when_any_download_fails(self) -> None:
+        url = "https://x.com/alice/status/123"
+        with NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as handle:
+            handle.write(f"# a comment\n{url}\n")
+            input_path = handle.name
+        self.addCleanup(unlink, input_path)
+
+        with patch.object(MediaDownloader, "download", side_effect=RuntimeError("private post")):
+            result = CliRunner().invoke(app, ["batch", input_path])
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Completed: 0 succeeded, 1 failed.", result.output)
+        self.assertIn("private post", result.output)
 
 
 if __name__ == "__main__":

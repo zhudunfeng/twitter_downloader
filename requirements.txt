@@ -1,3 +1,5 @@
 requests==2.34.2
 Pillow==12.3.0
 yt-dlp==2025.07.01
+click==8.3.1
+rich==14.3.3
