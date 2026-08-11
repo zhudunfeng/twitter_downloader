@@ -1,0 +1,10 @@
+pipeline:
+  - name: 压缩归档
+    when: 变更通过验证后
+  - name: 构建文档包
+    when: 每个可交付里程碑
+  - name: 出版
+    when: 审批完成
+  - name: 历史封存
+    when: 文档过时后
+    path: $>/vault/live/
