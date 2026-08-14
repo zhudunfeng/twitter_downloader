@@ -10,14 +10,18 @@ stages:
   - step: build@python
     name: build_application
     displayName: 安装依赖、测试并构建应用
-    pythonVersion: "3.14"
+    pythonVersion: "3.10"
     commands:
+    - set -e
     - python --version
     - python -m pip --version
     - python -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
     - python -m pip install --upgrade pip
-    - python -m pip install -r requirements.txt
+    - python -c "from pathlib import Path; Path('ci-requirements.txt').write_text(''.join(line for line in Path('requirements.txt').read_text(encoding='utf-8').splitlines(keepends=True) if not line.startswith('yt-dlp==')), encoding='utf-8')"
+    - python -m pip install -r ci-requirements.txt
+    - python -m pip install yt-dlp==2026.7.4
     - python -m pip install pyinstaller==6.22.0
+    - python -m pip check
     - python -m unittest discover -s tests -p 'test*.py' -v
     - python -m compileall -q twitter_downloader gui_launcher.py
     - python -m twitter_downloader --help
