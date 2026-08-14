@@ -1,61 +1,66 @@
 version: "1.0"
-name: 构建、上传、发布
-displayName: 构建、上传、发布
+name: 测试、构建与发布
+displayName: 测试、构建与发布
+
 stages:
-- name: 构建
-  displayName: 构建
+- name: 校验与构建
+  displayName: 校验与构建
   strategy: naturally
   trigger: auto
   steps:
   - step: build@python
-    name: ""
-    displayName: Python 构建
+    name: build_application
+    displayName: 安装依赖、测试并构建应用
     pythonVersion: "3.14"
     commands:
-    - pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-    - '# 可以使用pip下载依赖'
-    - pip install --upgrade pip
-    - pip install --user -r requirements.txt pyinstaller
     - python --version
-    - python -m PyInstaller --noconsole --onedir --name TwitterDownloader --paths
-      . gui_launcher.py
+    - python -m pip --version
+    - python -m pip install --upgrade pip
+    - python -m pip install -r requirements.txt
+    - python -m pip install pyinstaller==6.22.0
+    - python -m unittest discover -s tests -p 'test*.py' -v
+    - python -m compileall -q twitter_downloader gui_launcher.py
+    - python -m twitter_downloader --help
+    - python -m PyInstaller --noconfirm --clean --noconsole --onedir --name TwitterDownloader --paths . --distpath ci-dist --workpath ci-work --specpath ci-spec gui_launcher.py
     artifacts:
-    - name: BUILD_ARTIFACT
+    - name: TWITTER_DOWNLOADER_APP
       path:
-      - ./
-      type: .tar.gz
+      - ./ci-dist/TwitterDownloader
+      type: .zip
     notify: []
     strategy:
       retry: "0"
       resource:
         cpu: "2"
         memory: "4"
-- name: 上传
-  displayName: 上传
+
+- name: 上传制品
+  displayName: 上传制品
   strategy: naturally
   trigger: auto
   steps:
   - step: publish@general_artifacts
-    name: _1
-    displayName: 上传制品
-    dependArtifact: BUILD_ARTIFACT
-    artifactName: output
+    name: publish_application
+    displayName: 上传应用压缩包
+    dependArtifact: TWITTER_DOWNLOADER_APP
+    artifactName: twitter-downloader
     notify: []
     strategy:
       retry: "0"
       resource:
         cpu: "2"
         memory: "4"
-- name: 发布
-  displayName: 发布
+
+- name: 发布版本
+  displayName: 发布版本
   strategy: naturally
-  trigger: auto
+  trigger: manual
   steps:
   - step: publish@release_artifacts
-    name: _2
-    displayName: 发布
-    dependArtifact: output
-    version: 1.0.0.0
+    name: release_application
+    displayName: 发布应用版本
+    dependArtifact: twitter-downloader
+    version: "0.1.0"
     autoIncrement: true
     notify: []
     strategy:
@@ -63,8 +68,11 @@ stages:
       resource:
         cpu: "2"
         memory: "4"
+
 triggers:
-  trigger: manual
+  trigger: auto
+
 notify: []
+
 strategy:
   blocking: true
