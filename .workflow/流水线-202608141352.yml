@@ -10,7 +10,7 @@ stages:
   - step: build@python
     name: ""
     displayName: Python 构建
-    pythonVersion: "3.14"
+    pythonVersion: "3.10"
     commands:
     - pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
     - '# 可以使用pip下载依赖'
