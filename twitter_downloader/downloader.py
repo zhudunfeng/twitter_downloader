@@ -4,12 +4,33 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import yt_dlp
 
 from .models import MediaItem, TweetInfo
 from .output import OutputPathBuilder
+from .progress import ProgressHandler
+
+
+class _ProgressLogger:
+    def __init__(self, progress: ProgressHandler, verbose: bool) -> None:
+        self.progress = progress
+        self.verbose = verbose
+
+    def debug(self, message: str) -> None:
+        if self.verbose:
+            self.progress.on_log(message)
+
+    def info(self, message: str) -> None:
+        if self.verbose:
+            self.progress.on_log(message)
+
+    def warning(self, message: str) -> None:
+        self.progress.on_log(f"WARNING: {message}")
+
+    def error(self, message: str) -> None:
+        self.progress.on_log(f"ERROR: {message}")
 
 
 class Downloader:
@@ -20,6 +41,7 @@ class Downloader:
         max_workers: int = 8,
         cookies: str | None = None,
         verbose: bool = False,
+        progress: ProgressHandler | None = None,
     ) -> None:
         if not 1 <= max_workers <= 8:
             raise ValueError("max_workers must be between 1 and 8")
@@ -27,6 +49,7 @@ class Downloader:
         self.max_workers = max_workers
         self.cookies = cookies
         self.verbose = verbose
+        self.progress = progress
 
     def download(self, tweet: TweetInfo) -> str:
         target_dir = self.output_path_builder.tweet_dir(
@@ -42,6 +65,8 @@ class Downloader:
         if images:
             self._save_images(images, target_dir, tweet.tweet_id)
         self._save_metadata(tweet, target_dir)
+        if self.progress is not None:
+            self.progress.on_done(target_dir)
         return target_dir
 
     def _save_video(self, item: MediaItem, target_dir: str, tweet_id: str, index: int) -> None:
@@ -63,12 +88,33 @@ class Downloader:
             "retries": 3,
         }
         self._apply_cookie_options(options)
+        if self.progress is not None:
+            options["progress_hooks"] = [self._build_progress_hook()]
+            options["logger"] = _ProgressLogger(self.progress, self.verbose)
         with yt_dlp.YoutubeDL(cast(dict, options)) as ydl:
             result = ydl.download([item.url])
         expected_path = os.path.join(target_dir, f"{stem}.mp4")
         if result or not os.path.isfile(expected_path):
             files = ", ".join(os.path.basename(path) for path in glob(os.path.join(target_dir, f"{stem}.*")))
             raise RuntimeError(f"Video download did not produce an MP4 file ({files or 'no output'})")
+
+    def _build_progress_hook(self) -> Callable[[dict[str, Any]], None]:
+        progress = self.progress
+
+        def hook(download: dict[str, Any]) -> None:
+            if progress is None:
+                return
+            status = download.get("status") or ""
+            if status == "downloading":
+                total = download.get("total_bytes") or download.get("total_bytes_estimate") or download.get("filesize")
+                downloaded = download.get("downloaded_bytes")
+                if isinstance(total, (int, float)) and total > 0 and isinstance(downloaded, (int, float)):
+                    percent = max(0.0, min(float(downloaded) / float(total), 1.0)) * 100.0
+                    progress.on_progress(percent, "downloading")
+            elif status == "finished":
+                progress.on_progress(100.0, "finished")
+
+        return hook
 
     def _apply_cookie_options(self, options: dict[str, Any]) -> None:
         if not self.cookies:
@@ -85,11 +131,10 @@ class Downloader:
         from .utils import download_image_to_jpg
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {
-                pool.submit(download_image_to_jpg, item.url, os.path.join(target_dir, f"{tweet_id}_{index}.jpg")):
-                os.path.join(target_dir, f"{tweet_id}_{index}.jpg")
-                for index, item in enumerate(items, start=1)
-            }
+            futures = {}
+            for index, item in enumerate(items, start=1):
+                path = os.path.join(target_dir, f"{tweet_id}_{index}.jpg")
+                futures[pool.submit(download_image_to_jpg, item.url, path)] = path
             for future in as_completed(futures):
                 path = futures[future]
                 try:

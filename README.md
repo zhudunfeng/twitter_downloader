@@ -27,6 +27,16 @@ D:\adunsoftware\python\python3.14.4\Scripts\pip.exe install -r requirements.txt
 D:\adunsoftware\python\python3.14.4\python.exe -m pip install --upgrade yt-dlp
 ```
 
+## 图形界面
+
+安装依赖后，从项目根目录启动 Windows 图形界面：
+
+```powershell
+D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader.gui
+```
+
+打包为 Windows 安装包的命令和 Inno Setup 配置见 [PACKAGING.md](PACKAGING.md)。
+
 ## 单条下载
 
 以下两种形式等效：

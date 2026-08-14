@@ -7,10 +7,7 @@ from typing import Iterable
 
 import click
 
-from twitter_downloader.downloader import Downloader
-from twitter_downloader.extractor import YtDlpTweetExtractor
-from twitter_downloader.output import OutputPathBuilder
-from twitter_downloader.utils import ensure_dir, is_tweet_url
+from twitter_downloader.core import download_one
 
 
 @dataclass(frozen=True)
@@ -37,15 +34,7 @@ class MediaDownloader:
         cookies: str | None = None,
         verbose: bool = False,
     ) -> str:
-        if not is_tweet_url(url):
-            raise ValueError(f"Invalid Twitter/X URL: {url}")
-        ensure_dir(output_dir)
-        tweet = YtDlpTweetExtractor(cookies=cookies).extract(url)
-        return Downloader(
-            output_path_builder=OutputPathBuilder(base_dir=output_dir),
-            cookies=cookies,
-            verbose=verbose,
-        ).download(tweet)
+        return download_one(url, output_dir, cookies=cookies, verbose=verbose)
 
     def batch(
         self,

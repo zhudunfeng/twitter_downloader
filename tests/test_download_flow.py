@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import unittest
 from os import unlink
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from twitter_downloader.cli import MediaDownloader, app
+from twitter_downloader.core import download_one
 from twitter_downloader.downloader import Downloader
 from twitter_downloader.extractor import YtDlpTweetExtractor
-from twitter_downloader.models import TweetInfo, User
+from twitter_downloader.models import MediaItem, TweetInfo, User
+from twitter_downloader.output import OutputPathBuilder
 from twitter_downloader.utils import is_tweet_url
 
 
@@ -22,6 +24,26 @@ class FixtureExtractor(YtDlpTweetExtractor):
     def _extract_status(self, tweet_id: str) -> dict:
         self.requested_tweet_id = tweet_id
         return self.status
+
+
+class RecordingProgress:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def on_start(self, url: str) -> None:
+        self.events.append(("start", url))
+
+    def on_progress(self, percent: float, status: str) -> None:
+        self.events.append(("progress", f"{percent}:{status}"))
+
+    def on_log(self, message: str) -> None:
+        self.events.append(("log", message))
+
+    def on_done(self, path: str) -> None:
+        self.events.append(("done", path))
+
+    def on_error(self, url: str, error: str) -> None:
+        self.events.append(("error", f"{url}:{error}"))
 
 
 class DownloadFlowTests(unittest.TestCase):
@@ -65,6 +87,91 @@ class DownloadFlowTests(unittest.TestCase):
     def test_downloader_enforces_the_eight_worker_limit(self) -> None:
         with self.assertRaises(ValueError):
             Downloader(max_workers=9)
+
+    def test_metadata_omits_article_section_when_no_article_exists(self) -> None:
+        tweet = TweetInfo("123", "https://x.com/alice/status/123", User("alice"))
+        with TemporaryDirectory() as output_dir:
+            destination = Downloader(OutputPathBuilder(output_dir)).download(tweet)
+            with open(f"{destination}/tweet.md", encoding="utf-8") as handle:
+                markdown = handle.read()
+
+        self.assertNotIn("## article", markdown)
+
+    def test_video_download_forwards_yt_dlp_logs_to_progress_handler(self) -> None:
+        progress = RecordingProgress()
+        downloader = Downloader(progress=progress, verbose=True)
+        video = MediaItem("video", "https://x.com/alice/status/123/video/1")
+
+        with patch("twitter_downloader.downloader.yt_dlp.YoutubeDL") as youtube_dl, patch(
+            "twitter_downloader.downloader.os.path.isfile", return_value=True
+        ):
+            youtube_dl.return_value.__enter__.return_value.download.return_value = 0
+            downloader._save_video(video, "downloads", "123", 1)
+
+        options = youtube_dl.call_args.args[0]
+        options["logger"].debug("extracting media")
+        options["logger"].warning("rate limited")
+        self.assertIn(("log", "extracting media"), progress.events)
+        self.assertIn(("log", "WARNING: rate limited"), progress.events)
+
+    def test_core_reports_start_progress_and_completion(self) -> None:
+        url = "https://x.com/alice/status/123"
+        tweet = TweetInfo("123", url, User("alice"))
+        progress = RecordingProgress()
+
+        class FakeDownloader:
+            def __init__(self, **kwargs) -> None:
+                self.progress = kwargs["progress"]
+
+            def download(self, downloaded_tweet: TweetInfo) -> str:
+                self.progress.on_progress(50.0, "downloading")
+                self.progress.on_done("downloads/alice/00000000/123")
+                return "downloads/alice/00000000/123"
+
+        with patch("twitter_downloader.core.YtDlpTweetExtractor") as extractor, patch(
+            "twitter_downloader.core.Downloader", FakeDownloader
+        ):
+            extractor.return_value.extract.return_value = tweet
+            destination = download_one(url, progress=progress)
+
+        self.assertEqual(destination, "downloads/alice/00000000/123")
+        self.assertEqual(
+            progress.events,
+            [
+                ("start", url),
+                ("progress", "50.0:downloading"),
+                ("done", "downloads/alice/00000000/123"),
+            ],
+        )
+
+    def test_core_reports_errors_before_reraising(self) -> None:
+        url = "https://x.com/alice/status/123"
+        progress = RecordingProgress()
+
+        with patch("twitter_downloader.core.YtDlpTweetExtractor") as extractor:
+            extractor.return_value.extract.side_effect = RuntimeError("private post")
+            with self.assertRaisesRegex(RuntimeError, "private post"):
+                download_one(url, progress=progress)
+
+        self.assertEqual(progress.events, [("start", url), ("error", f"{url}:private post")])
+
+    def test_core_reports_invalid_urls_to_progress_handler(self) -> None:
+        url = "https://example.com/not-a-tweet"
+        progress = RecordingProgress()
+
+        with self.assertRaisesRegex(ValueError, "Invalid Twitter/X URL"):
+            download_one(url, progress=progress)
+
+        self.assertEqual(progress.events, [("start", url), ("error", f"{url}:Invalid Twitter/X URL: {url}")])
+
+    def test_cli_delegates_downloads_to_the_core_flow(self) -> None:
+        client = MediaDownloader()
+        url = "https://x.com/alice/status/123"
+        with patch("twitter_downloader.cli.download_one", return_value="downloads/alice/20260811/123") as download:
+            destination = client.download(url, "downloads", cookies="cookies.txt", verbose=True)
+
+        self.assertEqual(destination, "downloads/alice/20260811/123")
+        download.assert_called_once_with(url, "downloads", cookies="cookies.txt", verbose=True)
 
     def test_batch_skips_comments_and_duplicates_and_collects_failures(self) -> None:
         good_url = "https://x.com/alice/status/123"
