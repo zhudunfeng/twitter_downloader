@@ -1,7 +1,6 @@
 version: "1.0"
 name: 测试、构建与发布
 displayName: 测试、构建与发布
-
 stages:
 - name: 校验与构建
   displayName: 校验与构建
@@ -22,7 +21,8 @@ stages:
     - python -m unittest discover -s tests -p 'test*.py' -v
     - python -m compileall -q twitter_downloader gui_launcher.py
     - python -m twitter_downloader --help
-    - python -m PyInstaller --noconfirm --clean --noconsole --onedir --name TwitterDownloader --paths . --distpath ci-dist --workpath ci-work --specpath ci-spec gui_launcher.py
+    - python -m PyInstaller --noconfirm --clean --noconsole --onedir --name TwitterDownloader
+      --paths . --distpath ci-dist --workpath ci-work --specpath ci-spec gui_launcher.py
     artifacts:
     - name: TWITTER_DOWNLOADER_APP
       path:
@@ -34,7 +34,6 @@ stages:
       resource:
         cpu: "2"
         memory: "4"
-
 - name: 上传制品
   displayName: 上传制品
   strategy: naturally
@@ -51,7 +50,6 @@ stages:
       resource:
         cpu: "2"
         memory: "4"
-
 - name: 发布版本
   displayName: 发布版本
   strategy: naturally
@@ -61,7 +59,7 @@ stages:
     name: release_application
     displayName: 发布应用版本
     dependArtifact: twitter-downloader
-    version: "0.1.0"
+    version: 0.1.0
     autoIncrement: true
     notify: []
     strategy:
@@ -69,11 +67,8 @@ stages:
       resource:
         cpu: "2"
         memory: "4"
-
 triggers:
-  trigger: auto
-
+  trigger: manual
 notify: []
-
 strategy:
   blocking: true
