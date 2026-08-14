@@ -3,3 +3,8 @@
 reasonix.toml
 .idea
 __pycache__
+.agents
+.claude
+.codex
+.cursor
+.opencode
