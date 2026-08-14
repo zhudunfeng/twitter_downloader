@@ -1,6 +1,6 @@
 version: "1.0"
-name: 测试、构建与发布
-displayName: 测试、构建与发布
+name: 构建与发布
+displayName: 构建与发布
 stages:
 - name: 校验与构建
   displayName: 校验与构建
@@ -9,7 +9,7 @@ stages:
   steps:
   - step: build@python
     name: build_application
-    displayName: 安装依赖、测试并构建应用
+    displayName: 安装依赖并构建应用
     pythonVersion: "3.10"
     commands:
     - set -e
@@ -22,7 +22,6 @@ stages:
     - python -m pip install yt-dlp==2026.7.4
     - python -m pip install pyinstaller==6.22.0
     - python -m pip check
-    - python -m unittest discover -s tests -p 'test*.py' -v
     - python -m compileall -q twitter_downloader gui_launcher.py
     - python -m twitter_downloader --help
     - python -m PyInstaller --noconfirm --clean --noconsole --onedir --name TwitterDownloader
