@@ -1,6 +1,6 @@
 version: "1.0"
-name: 构建、上传、发布、部署到自有主机
-displayName: 构建、上传、发布、部署到自有主机
+name: 构建、上传、发布
+displayName: 构建、上传、发布
 stages:
 - name: 构建
   displayName: 构建
@@ -62,29 +62,6 @@ stages:
       resource:
         cpu: "2"
         memory: "4"
-- name: 部署
-  displayName: 部署
-  strategy: naturally
-  trigger: auto
-  steps:
-  - step: deploy@agent
-    name: _3
-    displayName: 主机部署
-    deployArtifact:
-    - name: output
-      target: "~/gitee_go/deploy"
-      source: artifact
-      dependArtifact: ""
-      artifactRepository: default
-      artifactName: output
-      artifactVersion: latest
-    script: |-
-      # 请在此输入部署脚本，如启动Java应用如下
-      # nohup java -jar test.jar &gt; nohup.out &amp;
-       echo 'Hello Gitee!'
-    notify: []
-    strategy:
-      retry: "0"
 triggers:
   trigger: manual
 notify: []
