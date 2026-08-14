@@ -13,8 +13,13 @@ stages:
     pythonVersion: "3.10"
     commands:
     - set -e
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y python3.10 python3.10-dev python3.10-venv
+    - /usr/bin/python3.10 -m venv .ci-venv
+    - export PATH="$PWD/.ci-venv/bin:$PATH"
     - python --version
     - python -m pip --version
+    - python -c "import sysconfig; assert sysconfig.get_config_var('Py_ENABLE_SHARED') == 1, 'Python shared library is unavailable'"
     - python -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
     - python -m pip install --upgrade pip
     - python -c "from pathlib import Path; Path('ci-requirements.txt').write_text(''.join(line for line in Path('requirements.txt').read_text(encoding='utf-8').splitlines(keepends=True) if not line.startswith('yt-dlp==')), encoding='utf-8')"
