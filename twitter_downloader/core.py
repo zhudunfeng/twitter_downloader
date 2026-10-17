@@ -15,6 +15,7 @@ def download_one(
     *,
     cookies: str | None = None,
     verbose: bool = False,
+    use_authenticated: bool = True,
     progress: ProgressHandler | None = None,
 ) -> str:
     if progress is not None:
@@ -23,10 +24,11 @@ def download_one(
         if not is_tweet_url(url):
             raise ValueError(f"Invalid Twitter/X URL: {url}")
         ensure_dir(output_dir)
-        tweet = YtDlpTweetExtractor(cookies=cookies).extract(url)
+        extractor = YtDlpTweetExtractor(cookies=cookies, use_authenticated=use_authenticated)
+        tweet = extractor.extract(url)
         return Downloader(
             output_path_builder=OutputPathBuilder(base_dir=output_dir),
-            cookies=cookies,
+            cookies=extractor.active_cookies,
             verbose=verbose,
             progress=progress,
         ).download(tweet)
@@ -41,9 +43,18 @@ def download_batch(
     output_dir: str = "downloads",
     *,
     cookies: str | None = None,
+    use_authenticated: bool = True,
     progress: ProgressHandler | None = None,
 ) -> list[str]:
     results: list[str] = []
     for url in urls:
-        results.append(download_one(url, output_dir, cookies=cookies, progress=progress))
+        results.append(
+            download_one(
+                url,
+                output_dir,
+                cookies=cookies,
+                use_authenticated=use_authenticated,
+                progress=progress,
+            )
+        )
     return results

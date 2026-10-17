@@ -1,0 +1,4 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Restricted-tweet failures must surface explicit errors"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Package layout convention"}

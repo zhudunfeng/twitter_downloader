@@ -6,7 +6,7 @@ import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 import requests
 from PIL import Image
@@ -26,6 +26,59 @@ def sanitize_filename(name: str) -> str:
 
 def is_tweet_url(value: str) -> bool:
     return bool(_URL_RE.match(value.strip()))
+
+
+class _SilentLogger:
+    def debug(self, message: str) -> None:
+        pass
+
+    def info(self, message: str) -> None:
+        pass
+
+    def warning(self, message: str) -> None:
+        pass
+
+    def error(self, message: str) -> None:
+        pass
+
+
+def cookie_sources(cookies: str | None = None) -> Iterator[str]:
+    """Yield cookie sources lazily: explicit, then a stored cookie file, then browsers."""
+    if cookies and cookies.strip().lower() not in {"", "auto"}:
+        yield cookies.strip()
+        return
+
+    for candidate in _cookie_file_candidates():
+        if candidate.is_file():
+            yield str(candidate)
+
+    import yt_dlp
+
+    for browser in ("chrome", "edge", "firefox", "brave", "chromium", "vivaldi", "opera"):
+        try:
+            with yt_dlp.YoutubeDL({
+                "quiet": True,
+                "no_warnings": True,
+                "logger": _SilentLogger(),
+                "cookiesfrombrowser": (browser,),
+            }) as ydl:
+                has_session = any(
+                    cookie.name in {"auth_token", "ct0"}
+                    and any(domain in (cookie.domain or "") for domain in ("x.com", "twitter.com"))
+                    for cookie in ydl.cookiejar
+                )
+        except Exception:
+            continue
+        if has_session:
+            yield f"browser={browser}"
+
+
+def _cookie_file_candidates() -> list[Path]:
+    appdata = os.environ.get("APPDATA")
+    candidates = [Path.cwd() / "cookies.txt"]
+    if appdata:
+        candidates.insert(0, Path(appdata) / "TwitterDownloader" / "cookies.txt")
+    return candidates
 
 
 def ensure_dir(path: str) -> str:

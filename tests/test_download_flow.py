@@ -76,6 +76,136 @@ class DownloadFlowTests(unittest.TestCase):
         self.assertIn("name=orig", tweet.media[0].url)
         self.assertEqual(tweet.media[1].url, "https://x.com/alice/status/12345/video/2?s=20")
 
+    def test_video_uses_best_mp4_variant_when_available(self) -> None:
+        extractor = FixtureExtractor(
+            {
+                "id_str": "123",
+                "full_text": "video post",
+                "created_at": "2026-08-11T06:31:02.000Z",
+                "user": {"screen_name": "alice", "name": "Alice", "id_str": "42"},
+                "extended_entities": {
+                    "media": [
+                        {
+                            "type": "video",
+                            "original_info": {"width": 544, "height": 928},
+                            "video_info": {
+                                "variants": [
+                                    {"content_type": "application/x-mpegURL", "url": "https://video.twimg.com/pl.m3u8"},
+                                    {"content_type": "video/mp4", "bitrate": 632000, "url": "https://video.twimg.com/low.mp4"},
+                                    {"content_type": "video/mp4", "bitrate": 2176000, "url": "https://video.twimg.com/high.mp4"},
+                                ]
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+
+        tweet = extractor.extract("https://x.com/alice/status/123")
+
+        self.assertEqual([item.url for item in tweet.media], ["https://video.twimg.com/high.mp4"])
+
+    def test_tombstone_response_reports_authentication_requirement(self) -> None:
+        extractor = FixtureExtractor(
+            {
+                "__typename": "TweetTombstone",
+                "extended_entities": {"media": []},
+            }
+        )
+        extractor.auto_cookies = False
+
+        with self.assertRaisesRegex(RuntimeError, "authenticated session"):
+            extractor.extract("https://x.com/alice/status/123")
+
+    def test_empty_status_is_not_reported_as_a_successful_download(self) -> None:
+        extractor = FixtureExtractor({"user": {}, "extended_entities": {"media": []}})
+        extractor.auto_cookies = False
+
+        with self.assertRaisesRegex(RuntimeError, "age-restricted"):
+            extractor.extract("https://x.com/alice/status/123")
+
+    def test_auto_cookie_retry_uses_detected_source(self) -> None:
+        restricted = {"__typename": "TweetTombstone", "extended_entities": {"media": []}}
+        allowed = {
+            "id_str": "123",
+            "full_text": "unlocked",
+            "user": {"screen_name": "alice", "name": "Alice", "id_str": "42"},
+            "extended_entities": {"media": []},
+        }
+        extractor = FixtureExtractor(restricted)
+        extractor.status = None
+
+        with patch("twitter_downloader.extractor.cookie_sources", return_value=iter(["browser=chrome"])) as detect:
+            calls = []
+
+            def fake_status(tweet_id: str) -> dict:
+                calls.append(tweet_id)
+                return restricted if len(calls) == 1 else allowed
+
+            extractor._extract_status = fake_status
+            tweet = extractor.extract("https://x.com/alice/status/123")
+
+        detect.assert_called_once()
+        self.assertEqual(extractor.active_cookies, "browser=chrome")
+        self.assertEqual(tweet.text, "unlocked")
+
+    def test_anonymous_mode_uses_syndication_endpoint(self) -> None:
+        extractor = YtDlpTweetExtractor(use_authenticated=False)
+        captured: dict = {}
+
+        class FakeYdl:
+            def __init__(self, options: dict) -> None:
+                captured.update(options)
+
+            def __enter__(self) -> "FakeYdl":
+                return self
+
+            def __exit__(self, *_exc) -> None:
+                return None
+
+            def get_info_extractor(self, _name: str):
+                raise AssertionError("extractor should not be queried by this test")
+
+        with patch("twitter_downloader.extractor.yt_dlp.YoutubeDL", FakeYdl):
+            with self.assertRaises(AssertionError):
+                extractor._extract_status("123")
+
+        self.assertEqual(captured["extractor_args"], {"twitter": {"api": ["syndication"]}})
+
+    def test_authenticated_mode_does_not_force_syndication(self) -> None:
+        extractor = YtDlpTweetExtractor()
+        captured: dict = {}
+
+        class FakeYdl:
+            def __init__(self, options: dict) -> None:
+                captured.update(options)
+
+            def __enter__(self) -> "FakeYdl":
+                return self
+
+            def __exit__(self, *_exc) -> None:
+                return None
+
+            def get_info_extractor(self, _name: str):
+                raise AssertionError("stop here")
+
+        with patch("twitter_downloader.extractor.yt_dlp.YoutubeDL", FakeYdl):
+            with self.assertRaises(AssertionError):
+                extractor._extract_status("123")
+
+        self.assertNotIn("extractor_args", captured)
+
+    def test_anonymous_mode_does_not_retry_with_cookies(self) -> None:
+        extractor = FixtureExtractor({"__typename": "TweetTombstone", "extended_entities": {"media": []}})
+        extractor.auto_cookies = True
+        extractor.use_authenticated = False
+
+        with patch("twitter_downloader.extractor.cookie_sources") as sources:
+            with self.assertRaisesRegex(RuntimeError, "authenticated API option"):
+                extractor.extract("https://x.com/alice/status/123")
+
+        sources.assert_not_called()
+
     def test_model_accepts_article_urls(self) -> None:
         tweet = TweetInfo("1", "https://x.com/alice/status/1", User("alice"), article_urls=["https://example.com/article"])
         self.assertEqual(tweet.article_urls, ["https://example.com/article"])
@@ -171,7 +301,13 @@ class DownloadFlowTests(unittest.TestCase):
             destination = client.download(url, "downloads", cookies="cookies.txt", verbose=True)
 
         self.assertEqual(destination, "downloads/alice/20260811/123")
-        download.assert_called_once_with(url, "downloads", cookies="cookies.txt", verbose=True)
+        download.assert_called_once_with(
+            url,
+            "downloads",
+            cookies="cookies.txt",
+            verbose=True,
+            use_authenticated=True,
+        )
 
     def test_batch_skips_comments_and_duplicates_and_collects_failures(self) -> None:
         good_url = "https://x.com/alice/status/123"

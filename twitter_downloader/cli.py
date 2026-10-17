@@ -33,8 +33,15 @@ class MediaDownloader:
         *,
         cookies: str | None = None,
         verbose: bool = False,
+        use_authenticated: bool = True,
     ) -> str:
-        return download_one(url, output_dir, cookies=cookies, verbose=verbose)
+        return download_one(
+            url,
+            output_dir,
+            cookies=cookies,
+            verbose=verbose,
+            use_authenticated=use_authenticated,
+        )
 
     def batch(
         self,
@@ -43,6 +50,7 @@ class MediaDownloader:
         *,
         cookies: str | None = None,
         verbose: bool = False,
+        use_authenticated: bool = True,
     ) -> BatchDownloadResult:
         result = BatchDownloadResult()
         seen_urls: set[str] = set()
@@ -52,7 +60,15 @@ class MediaDownloader:
                 continue
             seen_urls.add(url)
             try:
-                result.destinations.append(self.download(url, output_dir, cookies=cookies, verbose=verbose))
+                result.destinations.append(
+                    self.download(
+                        url,
+                        output_dir,
+                        cookies=cookies,
+                        verbose=verbose,
+                        use_authenticated=use_authenticated,
+                    )
+                )
             except Exception as exc:
                 self._logger.error("Download failed %s: %s", url, exc)
                 result.failures.append(BatchFailure(url=url, error=str(exc)))
@@ -72,16 +88,25 @@ def app(ctx: click.Context, verbose: bool) -> None:
 @app.command()
 @click.argument("url")
 @click.option("--output", "-o", default="downloads", show_default=True)
-@click.option("--cookies", default=None, help='Cookie file or browser="chrome".')
+@click.option("--cookies", default=None, help='Cookie file, browser="chrome", or "auto" to auto-detect.')
+@click.option("--anonymous", is_flag=True, help="Use the anonymous syndication endpoint instead of the authenticated API.")
 @click.option("--verbose", is_flag=True, help="Enable yt-dlp debug logging.")
 @click.pass_context
-def single(ctx: click.Context, url: str, output: str, cookies: str | None, verbose: bool) -> None:
+def single(
+    ctx: click.Context,
+    url: str,
+    output: str,
+    cookies: str | None,
+    anonymous: bool,
+    verbose: bool,
+) -> None:
     try:
         destination = ctx.obj["client"].download(
             url,
             output,
             cookies=cookies,
             verbose=verbose or ctx.obj["verbose"],
+            use_authenticated=not anonymous,
         )
         click.echo(f"Saved to: {destination}")
     except Exception as exc:
@@ -92,10 +117,18 @@ def single(ctx: click.Context, url: str, output: str, cookies: str | None, verbo
 @app.command()
 @click.argument("input_path")
 @click.option("--output", "-o", default="downloads", show_default=True)
-@click.option("--cookies", default=None, help='Cookie file or browser="chrome".')
+@click.option("--cookies", default=None, help='Cookie file, browser="chrome", or "auto" to auto-detect.')
+@click.option("--anonymous", is_flag=True, help="Use the anonymous syndication endpoint instead of the authenticated API.")
 @click.option("--verbose", is_flag=True, help="Enable yt-dlp debug logging.")
 @click.pass_context
-def batch(ctx: click.Context, input_path: str, output: str, cookies: str | None, verbose: bool) -> None:
+def batch(
+    ctx: click.Context,
+    input_path: str,
+    output: str,
+    cookies: str | None,
+    anonymous: bool,
+    verbose: bool,
+) -> None:
     try:
         with open(input_path, "r", encoding="utf-8") as handle:
             urls = [line.strip() for line in handle if line.strip() and not line.lstrip().startswith("#")]
@@ -110,6 +143,7 @@ def batch(ctx: click.Context, input_path: str, output: str, cookies: str | None,
         output,
         cookies=cookies,
         verbose=verbose or ctx.obj["verbose"],
+        use_authenticated=not anonymous,
     )
     click.echo(f"Completed: {len(result.destinations)} succeeded, {len(result.failures)} failed.")
     for failure in result.failures:

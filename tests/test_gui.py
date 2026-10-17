@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -52,3 +53,17 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(window.history_list.count(), 1)
         self.assertEqual(window.history_list.item(0).text(), "Failed: https://x.com/alice/status/123")
         self.assertEqual(window._history[-1]["outcome"], "failed: private post")
+
+    def test_authenticated_api_option_defaults_to_enabled(self) -> None:
+        window = MainWindow()
+        self.addCleanup(window.deleteLater)
+
+        self.assertTrue(window.authenticated_check.isChecked())
+
+    def test_worker_passes_authenticated_flag_to_core(self) -> None:
+        worker = Worker("https://x.com/alice/status/123", "downloads", None, False, False)
+
+        with patch("twitter_downloader.gui.main.download_one") as download:
+            worker.run()
+
+        self.assertIs(download.call_args.kwargs["use_authenticated"], False)

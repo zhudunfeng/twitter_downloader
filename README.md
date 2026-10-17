@@ -72,12 +72,38 @@ D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader batch urls.
 
 ## 登录态与调试
 
-私密内容或需要登录的内容可以传入 Netscape 格式 cookie 文件，或读取浏览器 cookie：
+私密内容、成人限制内容或需要登录的内容可以传入 Netscape 格式 cookie 文件，或读取浏览器 cookie：
 
 ```powershell
 D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader batch urls.txt --cookies E:\cookies.txt
 D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader single <URL> --cookies browser=chrome --verbose
 ```
+
+不传 `--cookies` 时程序会自动加载登录态，顺序为：
+
+1. `%APPDATA%\TwitterDownloader\cookies.txt`
+2. 当前目录下的 `cookies.txt`
+3. 已登录 X 的浏览器（`chrome`、`edge`、`firefox` 等）
+
+也可以显式写出 `--cookies auto`，效果与不传相同。把浏览器导出的 cookie 放到上述路径后，后续下载无需再指定参数。
+
+### 解析接口（认证 / 匿名）
+
+提取元数据有两条接口路径，命令行和 GUI 都可切换：
+
+| 模式 | 命令行 | GUI | 说明 |
+|---|---|---|---|
+| 认证接口（默认） | 默认 / 不加参数 | 勾选 “Use authenticated API (GraphQL + cookies)” | 走 X 的 GraphQL 接口并携带登录态，可读取成人限制、仅登录可见等内容 |
+| 匿名接口 | `--anonymous` | 取消勾选该选项 | 走公开的 syndication 接口，不发送 cookie；遇到受限内容会直接报错 |
+
+```powershell
+# 使用匿名接口（不推荐用于受限内容）
+D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader single <URL> --anonymous
+```
+
+GUI 中的该开关会自动保存到配置文件，下次启动保持上次选择。
+
+> `yt-dlp` 无法读取正在运行且使用应用绑定加密的 Chrome cookie 数据库时，请先把 cookie 导出为 Netscape 文本文件，或关闭浏览器后重试。
 
 运行 `D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader --help` 查看完整命令帮助。
 

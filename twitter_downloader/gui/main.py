@@ -30,6 +30,7 @@ class Worker(QtCore.QThread):
         output_dir: str,
         cookies: Optional[str],
         verbose: bool,
+        use_authenticated: bool = True,
         parent: Optional[QtCore.QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -37,6 +38,7 @@ class Worker(QtCore.QThread):
         self.output_dir = output_dir
         self.cookies = cookies
         self.verbose = verbose
+        self.use_authenticated = use_authenticated
 
     def run(self) -> None:
         try:
@@ -45,6 +47,7 @@ class Worker(QtCore.QThread):
                 self.output_dir,
                 cookies=self.cookies,
                 verbose=self.verbose,
+                use_authenticated=self.use_authenticated,
                 progress=self,
             )
         except Exception as exc:  # pragma: no cover - GUI error surface
@@ -123,6 +126,13 @@ class MainWindow(QtWidgets.QMainWindow):
         cookie_row.addWidget(self.cookie_button)
         form.addRow("Cookies", cookie_row)
 
+        self.authenticated_check = QtWidgets.QCheckBox("Use authenticated API (GraphQL + cookies)")
+        self.authenticated_check.setToolTip(
+            "On: extract through X's authenticated GraphQL API, required for age-restricted or "
+            "login-only posts.\nOff: use the anonymous syndication endpoint."
+        )
+        form.addRow("API mode", self.authenticated_check)
+
         self.verbose_check = QtWidgets.QCheckBox("Show verbose log")
         form.addRow("", self.verbose_check)
 
@@ -164,6 +174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg = load_config()
         self.output_edit.setText(cfg.get("output_dir") or "downloads")
         self.cookie_edit.setText(cfg.get("cookies_path") or "")
+        self.authenticated_check.setChecked(bool(cfg.get("use_authenticated", True)))
         geom = cfg.get("window_geometry") or {}
         self.resize(int(geom.get("width") or 900), int(geom.get("height") or 520))
 
@@ -188,10 +199,11 @@ class MainWindow(QtWidgets.QMainWindow):
         output_dir = self.output_edit.text().strip() or "downloads"
         cookies = self.cookie_edit.text().strip() or None
         verbose = self.verbose_check.isChecked()
+        use_authenticated = self.authenticated_check.isChecked()
         self._set_downloading_state(True)
         self._append_log(f"Starting: {url}")
         self.progress.setValue(0)
-        self._worker = Worker(url, output_dir, cookies, verbose)
+        self._worker = Worker(url, output_dir, cookies, verbose, use_authenticated)
         self._worker.started_signal.connect(lambda u: self.status.setText(f"Downloading: {u}"))
         self._worker.progress_signal.connect(self._on_progress)
         self._worker.log_signal.connect(self._append_log)
@@ -251,6 +263,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.output_button.setEnabled(not busy)
         self.cookie_edit.setEnabled(not busy)
         self.cookie_button.setEnabled(not busy)
+        self.authenticated_check.setEnabled(not busy)
         self.verbose_check.setEnabled(not busy)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
@@ -261,6 +274,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         cfg["output_dir"] = self.output_edit.text().strip() or "downloads"
         cfg["cookies_path"] = self.cookie_edit.text().strip()
+        cfg["use_authenticated"] = self.authenticated_check.isChecked()
         save_config(cfg)
         super().closeEvent(event)
 

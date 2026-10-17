@@ -35,5 +35,6 @@ def _defaults() -> dict[str, Any]:
     return {
         "output_dir": "downloads",
         "cookies_path": "",
+        "use_authenticated": True,
         "window_geometry": {"width": 1220, "height": 820},
     }
