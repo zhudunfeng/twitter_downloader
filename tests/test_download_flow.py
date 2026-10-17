@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import logging
 import unittest
 from os import unlink
+from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
+import twitter_downloader.logging_setup as logging_setup_module
 from twitter_downloader.cli import MediaDownloader, app
 from twitter_downloader.core import download_one
 from twitter_downloader.downloader import Downloader
 from twitter_downloader.extractor import YtDlpTweetExtractor
+from twitter_downloader.logging_setup import get_logger, setup_logging
 from twitter_downloader.models import MediaItem, TweetInfo, User
 from twitter_downloader.output import OutputPathBuilder
 from twitter_downloader.utils import is_tweet_url
@@ -336,8 +340,70 @@ class DownloadFlowTests(unittest.TestCase):
             result = CliRunner().invoke(app, ["batch", input_path])
 
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("Completed: 0 succeeded, 1 failed.", result.output)
+        self.assertIn("完成：成功 0 条，失败 1 条。", result.output)
         self.assertIn("private post", result.output)
+
+
+class LoggingTests(unittest.TestCase):
+    """验证日志同时输出到控制台与文件。"""
+
+    def setUp(self) -> None:
+        # 每个用例前重置，避免上一个用例的 handler 占用文件句柄
+        _reset_logging()
+
+    def tearDown(self) -> None:
+        # 用例结束后立即关闭 handler，否则 Windows 下临时目录无法删除
+        _reset_logging()
+
+    def test_setup_logging_writes_to_console_and_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "app.log"
+            path = setup_logging(verbose=True, log_path=log_file)
+
+            get_logger("test").info("双路日志测试")
+            _reset_logging()
+
+            self.assertEqual(path, log_file)
+            self.assertTrue(log_file.is_file())
+            content = log_file.read_text(encoding="utf-8")
+        self.assertIn("双路日志测试", content)
+
+    def test_repeated_setup_does_not_duplicate_handlers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "app.log"
+            setup_logging(verbose=False, log_path=log_file)
+            setup_logging(verbose=True, log_path=log_file)
+            get_logger("test").info("只应出现一次")
+            _reset_logging()
+
+            content = log_file.read_text(encoding="utf-8")
+
+        self.assertEqual(content.count("只应出现一次"), 1)
+
+    def test_file_handler_keeps_debug_logs_when_not_verbose(self) -> None:
+        with TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "app.log"
+            setup_logging(verbose=False, log_path=log_file)
+
+            get_logger("test").debug("调试细节")
+            get_logger("test").info("普通信息")
+            _reset_logging()
+
+            content = log_file.read_text(encoding="utf-8")
+
+        # 控制台只显示 INFO，但文件应保留 DEBUG
+        self.assertIn("调试细节", content)
+        self.assertIn("普通信息", content)
+
+
+def _reset_logging() -> None:
+    """清空项目 logger 的 handler，便于测试重复初始化。"""
+    root = logging.getLogger("twitter_downloader")
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        handler.close()
+    logging_setup_module._configured = False
+    logging_setup_module._console_handler = None
 
 
 if __name__ == "__main__":

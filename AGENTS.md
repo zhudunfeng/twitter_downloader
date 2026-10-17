@@ -33,6 +33,13 @@
 ## Notes
 - 项目处于早期阶段，已有目录级模块骨架
 - 依赖安装命令中的 `Pillow` 保持 PEP 503 规范写法
+
+## USER CUSTOM
+
+- 方法必须有中文方法注释
+- 字段必须有中文字段注释
+- 关键逻辑必须有中文注释与中文日志
+
 <!-- TRELLIS:START -->
 # Trellis Instructions
 

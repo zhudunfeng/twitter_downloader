@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Optional
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from twitter_downloader.core import download_one
+from twitter_downloader.logging_setup import setup_logging
 from twitter_downloader.utils import is_tweet_url
 
 from .config import load_config, save_config
@@ -15,6 +17,9 @@ from .resources import ensure_app_metadata, icon_from_theme, themed_stylesheet
 
 
 APP_NAME = "TwitterDownloader"
+
+# GUI 日志器，日志同时写入控制台与文件
+_logger = logging.getLogger("twitter_downloader.gui")
 
 
 class Worker(QtCore.QThread):
@@ -238,8 +243,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.setText("Error")
 
     def _append_log(self, text: str) -> None:
+        """把日志写入界面日志区，同时落盘到日志文件。"""
         self.log_view.append(text)
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+        # UI 日志也要进入文件；进度行不进入文件以免刷屏
+        if not text.startswith("[progress]"):
+            _logger.info("%s", text.rstrip())
 
     def _append_history_record(self, url: str, outcome: str) -> None:
         self._history.append({"url": url, "outcome": outcome, "at": QtCore.QDateTime.currentDateTime().toString(QtCore.Qt.ISODate)})
@@ -280,10 +289,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def run() -> int:
+    """启动图形界面，同时把日志初始化到控制台与文件。"""
+    # GUI 模式默认非 verbose；日志文件始终记录全量日志
+    log_path = setup_logging(verbose=False)
     app = QtWidgets.QApplication(sys.argv)
     ensure_app_metadata(app)
     app.setStyleSheet(themed_stylesheet())
     window = MainWindow()
+    window._append_log(f"日志文件: {log_path}")
     window.show()
     return app.exec()
 

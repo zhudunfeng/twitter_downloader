@@ -35,6 +35,10 @@
    3. 当前工作目录 `cookies.txt`
    4. 已登录 X 的浏览器（chrome / edge / firefox / …）
 6. 匿名模式下不尝试 cookie 重试，错误信息提示启用认证接口。
+7. 日志同时输出到控制台与日志文件：
+   - 文件始终记录 DEBUG 全量日志，按 2 MB 轮转保留 5 份。
+   - 默认路径 `%APPDATA%\TwitterDownloader\logs\twitter_downloader.log`，可用 `--log-file` 覆盖。
+   - GUI 日志区内容同步写入同一份文件，并在启动时显示日志路径。
 
 ### 3.2 非功能性需求
 
@@ -49,11 +53,12 @@ twitter_downloader/
   extractor.py   # use_authenticated 开关、restriction 检测、最佳 mp4 变体
   utils.py       # cookie_sources() 惰性候选源、_SilentLogger
   core.py        # download_one/download_batch 透传 use_authenticated
-  cli.py         # --anonymous 标志
+  cli.py         # --anonymous 标志、--log-file
+  logging_setup.py  # 控制台 + 轮转文件双路日志
   gui/main.py    # 复选框、Worker 透传、配置持久化
   gui/config.py  # 默认值 use_authenticated: True
 tests/
-  test_download_flow.py  # 8 个新增/更新用例
+  test_download_flow.py  # 解析、CLI 与日志用例
   test_gui.py            # 3 个新增用例
 ```
 
@@ -64,6 +69,7 @@ tests/
 3. GUI 复选框默认勾选，重启后保持上次选择。
 4. 受限内容不再产生空目录 + 空 JSON 的“假成功”。
 5. `python -m unittest discover -s tests` 全部通过。
+6. CLI 与 GUI 的日志同时出现在控制台和日志文件中，文件保留 DEBUG 级细节。
 
 ## 6. 排除项
 

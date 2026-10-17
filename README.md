@@ -107,6 +107,22 @@ GUI 中的该开关会自动保存到配置文件，下次启动保持上次选�
 
 运行 `D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader --help` 查看完整命令帮助。
 
+## 日志
+
+日志会**同时输出到控制台和日志文件**：
+
+- 控制台：默认输出 INFO 及以上；加 `--verbose` 输出 DEBUG 详情。
+- 文件：始终记录 DEBUG 全量日志，按 2 MB 轮转，保留最近 5 份。
+- 默认路径：`%APPDATA%\TwitterDownloader\logs\twitter_downloader.log`
+- 可用 `--log-file <路径>` 指定其他位置；命令结束时会把日志路径打印出来。
+
+```powershell
+D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader single <URL> --verbose
+D:\adunsoftware\python\python3.14.4\python.exe -m twitter_downloader single <URL> --log-file E:\logs\twitter.log
+```
+
+GUI 同样使用这一套日志：界面日志区的内容会同步写入同一份日志文件，启动时日志区首行会显示日志路径。
+
 ## 输出目录
 
 ```text
