@@ -15,7 +15,7 @@
   "branch": "feat/authenticated-extraction-switch",
   "base_branch": "ui",
   "worktree_path": null,
-  "commit": null,
+  "commit": "f9b2d84,7d07071",
   "pr_url": null,
   "subtasks": [],
   "children": [],
