@@ -7,6 +7,16 @@ Windows 安装程序。除非命令中另有说明，所有命令都应在项目
 采用 `onedir` 模式是有意的。Qt、`yt-dlp` 及其运行时文件会保留在应用目录
 中，便于检查目标机器缺少的系统依赖。
 
+## 作品库与多媒体部署
+
+作品库继续使用 PySide6 Widgets，内嵌播放需要 `QtMultimedia`、`QtMultimediaWidgets`、对应 Qt 多媒体插件及它们的运行时 DLL。代码中的显式导入让 PyInstaller 的 PySide6 hooks 收集这些组件；发布时须保留完整 `onedir` 目录，不可只复制主 EXE。
+
+在构建输出 `_internal/PySide6` 中检查 `Qt6Multimedia.dll`、`Qt6MultimediaWidgets.dll`、`plugins/multimedia/ffmpegmediaplugin.dll` 及所需 FFmpeg 运行时库。具体文件名依安装的 PySide6 版本而定；外部 `ffmpeg.exe` 只负责下载合并/预览封面，不能替代 Qt 播放插件。
+
+发布前在目标 Windows 上导入一个离线作品目录，实际检查 JPEG 大图、H.264/AAC MP4 的画面与音轨、进度拖动、全屏返回、切换视频只保留一个音源，以及窄窗口/150%/200% 显示缩放。再检查损坏视频、缺少封面工具、无网络与未设置 cookies 的降级提示。仅运行 `offscreen` 启动检查不能证明实际音视频可用。
+
+索引和缓存写入当前用户应用数据目录，安装目录无需写权限。更新或卸载不应删除用户选定的原始下载目录。此功能不新增 Python 运行时依赖；仍使用 `requirements.txt` 中的 PySide6。
+
 ## 1. 准备构建环境
 
 构建机器需要准备以下环境：
@@ -105,20 +115,29 @@ $Python = "D:\adunsoftware\python\python3.14.4\python.exe"
 $BuildRoot = Join-Path (Get-Location) ".build\windows"
 
 New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
-& $Python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --noconsole `
-    --onedir `
-    --name TwitterDownloader `
-    --paths . `
-    --distpath (Join-Path $BuildRoot "dist") `
-    --workpath (Join-Path $BuildRoot "work") `
-    --specpath $BuildRoot `
-    gui_launcher.py
+$PreviousBuildPath = $env:PATH # 构建完成后恢复原有工具搜索路径。
+$PythonDirectory = Split-Path -Parent $Python # 当前 Python 的运行时目录。
+try {
+    # 避免 Poppler、Conda 等第三方目录的同名 DLL 混入 Qt 依赖。
+    $env:PATH = "$PythonDirectory;$PythonDirectory\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
+    & $Python -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --noconsole `
+        --onedir `
+        --name TwitterDownloader `
+        --paths . `
+        --distpath (Join-Path $BuildRoot "dist") `
+        --workpath (Join-Path $BuildRoot "work") `
+        --specpath $BuildRoot `
+        gui_launcher.py
 
-if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller failed"
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller failed"
+    }
+}
+finally {
+    $env:PATH = $PreviousBuildPath
 }
 ```
 
@@ -131,6 +150,13 @@ if ($LASTEXITCODE -ne 0) {
 
 请保留整个应用目录。可执行文件依赖旁边的 DLL、Qt 平台插件、Python 扩展
 和其他数据文件，不能只复制 `.exe` 文件。
+
+构建时隔离 PATH 只影响该次依赖分析，不改变系统设置；恢复后仍按正常 PATH
+查找外部 `ffmpeg`。不能仅以“构建成功”判断 Qt 可用，还应实际启动冻结程序。
+若 `QtCore` 报 `DLL load failed` 且提示找不到指定过程，可使用控制台构建查看
+异常，并检查 Analysis TOC 中 `icuuc.dll` 等同名依赖的来源。Windows 系统 ICU
+与带版本导出符号的第三方 ICU 不能互换；清理构建缓存并在隔离 PATH 下重建，
+不要往安装目录随意复制或替换系统 DLL。
 
 ## 5. 测试冻结后的应用
 
