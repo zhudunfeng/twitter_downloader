@@ -14,7 +14,7 @@ are disposable derived data.
 ```python
 Downloader.download(tweet: TweetInfo) -> str  # Existing constructor/callback contract remains.
 read_work(directory: str | Path, root: str | Path) -> LibraryWork
-LibraryRepository(db_path: str | Path)
+LibraryRepository(db_path: str | Path, personal_path: str | Path | None = None)
 repository.upsert(work: LibraryWork) -> None
 repository.query(query: LibraryQuery | None = None,
                  offset: int = 0, limit: int = 80) -> list[LibraryWork]
@@ -76,7 +76,8 @@ publication date. Schema 1 migrates in place; a future schema fails explicitly.
   `first_seen`, not the latest rescan time; ties use stable key order.
 - `LibraryQuery` supports literal case-insensitive substring search, exact
   author, inclusive ISO dates, kind `image|video|text|article|''`, and
-  `newest|oldest`. Bind all user SQL parameters and escape LIKE `%`, `_`, and
+  `newest|oldest` (and personal `recent`), plus `scope=all|liked|bookmarked` and
+  `folder_id` only inside the bookmarked scope. Bind all user SQL parameters and escape LIKE `%`, `_`, and
   backslash. Pagination clamps offset to nonnegative and limit to 1..10000;
   normal UI pages contain 80 works.
 
@@ -221,3 +222,175 @@ timeline receives only part of available space.
 
 **Correct:** restore the original single-player layout and allocate stretch so the
 timeline expands to its 700-pixel cap before the tail consumes the remainder.
+
+## 8. Scenario: Durable Likes and Custom Bookmark Folders
+
+### 8.1 Scope / Trigger
+
+Use this extension when changing local personal actions, bookmark folders,
+personal-list SQL, asynchronous write ownership, or the five-route navigation.
+Personal data cannot be reconstructed from downloaded originals. Keep it out of
+the disposable catalog, its pruning lifecycle, and archived work payloads.
+
+### 8.2 Signatures and Schema
+
+```python
+PersonalWorkState(work_key, liked_at=None, collected_at=None, folder_ids=(), revision=0)
+BookmarkFolder(id, name, is_system, created_at, updated_at)
+PersonalStateRepository(path)
+personal.list_folders() -> tuple[BookmarkFolder, ...]
+personal.get_states(keys: Iterable[str]) -> dict[str, PersonalWorkState]
+personal.set_liked(work_key: str, enabled: bool) -> PersonalWorkState
+personal.set_folders(work_key: str, folder_ids: Iterable[str]) -> PersonalWorkState
+personal.create_folder(name: str) -> BookmarkFolder
+personal.rename_folder(folder_id: str, name: str) -> BookmarkFolder
+personal.delete_folder(folder_id: str) -> dict[str, PersonalWorkState]
+personal.backup_to(destination: str | Path) -> None
+repository.personal_states(keys: Iterable[str]) -> dict[str, PersonalWorkState]
+LibraryPage.set_scope(scope: str, folder_id: str | None = None) -> None
+PersonalStateController(path, parent=None)
+controller.hydrate(states: dict[str, PersonalWorkState]) -> None
+controller.set_liked(key: str, enabled: bool) -> bool
+controller.set_folders(key: str, folder_ids: tuple[str, ...] | list[str]) -> bool
+controller.create_folder(name: str) -> bool
+controller.rename_folder(folder_id: str, name: str) -> bool
+controller.delete_folder(folder_id: str) -> bool
+controller.retry() -> bool
+controller.shutdown() -> bool
+```
+
+`personal.sqlite3`, `PRAGMA user_version=1`:
+
+- `work_state(work_key PRIMARY KEY, liked_at, collected_at, revision)`.
+- `folders(id PRIMARY KEY, name, name_key UNIQUE, is_system, created_at, updated_at)`.
+- `folder_items(folder_id REFERENCES folders(id) ON DELETE CASCADE, work_key,
+  added_at, PRIMARY KEY(folder_id, work_key))`.
+- Reverse work-to-folder, per-folder time, liked-time and collection-time indexes.
+
+`PersonalWorkState` and `BookmarkFolder` are immutable and separate from
+`LibraryWork`; public `like_count` is never changed by local likes. Personal time
+values are UTC milliseconds. Folder membership, not `collected_at`, determines
+whether a work is bookmarked.
+
+### 8.3 Contracts
+
+- `PERSONAL_DB_PATH` is `%APPDATA%/TwitterDownloader/personal.sqlite3` with the
+  existing config-directory fallback. It is user data, not a cache. No new
+  environment variable or settings key is introduced. Catalog/preview rebuilds,
+  rescans, and source pruning never remove personal rows.
+- Work identity remains canonical-root plus relative-directory qualified. Same
+  key reimport restores marks; separately rooted copies remain independent.
+  Relocation/renaming does not implicitly merge identities or migrate marks.
+- Fixed default folder ID is `default`. It cannot be renamed/deleted. Custom
+  folders use stable UUID IDs, flat structure, trimmed names of 1..40 characters,
+  no Unicode control-category characters, and NFKC/casefold duplicate keys.
+  Use `validate_folder_name` in both GUI and storage.
+- `set_liked` only changes like fields. `set_folders` validates every desired ID
+  and replaces all memberships in one short transaction. Duplicate desired sets
+  are idempotent and retain timestamps/revision. Adding more folders preserves
+  the collection episode; 0-to-1 starts it and 1-to-0 clears it.
+- Removing A preserves B and likes. Deleting a custom folder rehomes only its
+  otherwise-orphaned works to default in the same transaction, retaining the
+  collection episode. Deletion never removes archived files or catalog rows.
+- The picker saves the full desired set explicitly. Cancel is a no-op. New
+  collection preselects default without writing; pass `collected=False` so its
+  cancel-all button is absent. Empty normal save is disabled. Existing
+  collection offers an explicit cancel-all. Newly created folders persist as
+  their own action, and require picker save to associate the work.
+- Use SQL `EXISTS` for personal predicates before paging/count; never join all
+  memberships into repeated work rows or filter an already limited Python list.
+  `recent` means like time, collection-episode start, or per-folder added time,
+  with work-key ties. Search/type/date/author filters are ANDed with scope.
+- Initialize personal storage independently. Catalog worker connections attach
+  it with a bound read-only URI outside the catalog corruption-rebuild catch.
+  `personal_error` preserves ordinary all-work reading; personal scopes fail
+  explicitly when unavailable. Batch state hydration uses a short read snapshot
+  and two SELECTs per batch, without GUI-thread SQL or row-by-row queries.
+- Personal storage uses rollback DELETE journaling and EXTRA synchronization,
+  per-connection foreign keys, finite lock waits, and a single controller writer.
+  Unknown/future schema and corruption preserve original files and fail clearly.
+  Use SQLite backup API for consistent live backup; close before manual copying.
+- A controller-owned worker creates/uses/closes its connection. Its bounded
+  queue coalesces only pending same-work/same-action absolute targets; folder
+  CRUD forms an ordering barrier. Desired UI state overlays confirmed revisions;
+  stale hydration and old completions cannot replace newer user intent.
+- Controller mutation methods return whether an operation was accepted, not
+  whether SQLite committed it. `operation_finished(action, result)` confirms
+  success; `operation_failed(action, key)` identifies the failed operation for
+  targeted form recovery. An unrelated failure must not unlock another pending
+  picker. `has_failed_operation` and `busy` govern retry: do not replay an old
+  failed target over later intent or while another operation is pending. Keep
+  query retry separate from replaying a failed mutation.
+- Ordinary state paints use `dataChanged`, not full-model reset or media reload.
+  Personal-list mutation invalidates old query generations, then key-diff merges
+  a refreshed loaded interval to repair OFFSET shifts. Removing the anchor uses
+  surviving successor then predecessor, with its pixel offset. Last-item removal
+  keeps the current scope and its empty state.
+- Navigation has five entries but three stacked pages: all/liked/bookmarked use
+  the same LibraryPage and player; download/settings map explicitly. Each scope
+  retains session filters/order/anchor. Hidden/removed playing works pause in all
+  placements; neighbors never autoplay.
+- Shutdown drains accepted writes and processes their completion results even
+  during GUI `wait()`. A `False` return keeps MainWindow alive for retry; never
+  destroy a running worker. No automatic accepting/rejecting of unsaved data.
+
+### 8.4 Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty/control/overlength/normalized-duplicate folder name | Chinese inline error; no partial mutation |
+| Stale/deleted folder ID in a picker or scope | Revalidate and fail; never silently save a subset |
+| Personal missing on read-only attach | No new empty DB from ATTACH; main library remains readable |
+| Personal corrupt/future/unknown schema | Preserve personal DB; no catalog recovery or personal reset |
+| Write lock/read-only/full disk | Bounded failure, confirmed-state rollback, visible retry |
+| Query older than confirmed write | Drop generation or older revision; do not resurrect rows |
+| Queue full | Reject clearly before UI optimistic acceptance |
+| Closing with accepted writes | Drain, confirm results; defer close on unresolved save |
+
+### 8.5 Good / Base / Bad Cases
+
+- **Base:** import old `tweet.json`, like it, choose default, restart and read it
+  in both independent personal scopes without changing original source counters.
+- **Good:** add A+B, all list has one row; remove A and B remains; delete B and
+  default retains the work and original collection time.
+- **Bad:** delete A while a picker is open, race a stale page with an unlike, or
+  corrupt personal storage. Reject invalid writes, keep latest confirmed state,
+  show an honest error, and preserve archives and personal database.
+
+### 8.6 Tests Required
+
+- Schema/default protection/name normalization, idempotence and UTC timestamp
+  transitions; rollback and deletion-rehome transactions; consistent backup.
+- Multi-membership dedup/count/paging/sorting/filter composition, two-SELECT batch
+  hydration, orphan reimport, catalog rebuild independence, corruption/future
+  schema isolation, finite lock waits, and concurrent first-open processes.
+- Real Qt event-loop controller tests for coalescing, barriers, bounds, revisions,
+  failure rollback/retry and shutdown success/failure. Library/detail/picker
+  synchronization; save/cancel/new/rename/delete; Ctrl+L/B and precise hit areas.
+- QAbstractItemModelTester/persistent indexes; no model reset/cache invalidation
+  on marks; last-row removal, successor pixel anchor, refilling across page
+  boundaries; route mapping and per-scope filter/anchor restoration.
+- Native compact/150%/200% layouts, below-one-screen dark background, video
+  continuity for ordinary marks, and pause on removal including fullscreen and
+  separate dialog placement. Do not equate offscreen output with native playback.
+- 10k works with many memberships; report query timings separately from FPS.
+  Preserve maintained tests and do not retain newly generated unittest classes.
+
+### 8.7 Wrong vs Correct
+
+**Wrong:** store personal flags inside disposable catalog payloads, toggle SQL
+against stale UI state, filter only after LIMIT, or reset/redecode the reader on
+each like. An arbitrary membership JOIN can duplicate rows and break counts.
+
+**Correct:** separate durable user data, send desired values/full folder sets to
+one bounded writer, filter with EXISTS, merge confirmed revisions, and use
+targeted model notifications. Example SQL:
+
+```sql
+SELECT key, payload FROM library_works
+WHERE EXISTS (SELECT 1 FROM personal.folder_items AS fi
+              WHERE fi.work_key=library_works.key)
+ORDER BY (SELECT collected_at FROM personal.work_state AS ps
+          WHERE ps.work_key=library_works.key) DESC, key ASC
+LIMIT ? OFFSET ?;
+```

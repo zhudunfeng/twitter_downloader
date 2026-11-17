@@ -6,7 +6,7 @@ import logging
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from twitter_downloader.library.models import LibraryWork
+from twitter_downloader.library.models import LibraryWork, PersonalWorkState
 
 from .thumbnail_service import ThumbnailService
 from .timeline_model import TimelineModel
@@ -25,6 +25,8 @@ class TimelineView(QtWidgets.QListView):
     menu_requested = QtCore.Signal(object, QtCore.QPoint)  # 作品及菜单的全局位置。
     visible_changed = QtCore.Signal()  # 滚动、换宽或布局后通知活动视频定位。
     near_end = QtCore.Signal()  # 视口接近当前已加载数据的尾端。
+    like_requested = QtCore.Signal(object)  # 用户请求切换当前作品的本地喜欢状态。
+    bookmark_requested = QtCore.Signal(object)  # 用户请求整理当前作品的多个收藏夹。
 
     def __init__(
         self, thumbnails: ThumbnailService, parent: QtWidgets.QWidget | None = None
@@ -67,9 +69,10 @@ class TimelineView(QtWidgets.QListView):
         self.setWordWrap(False)
         self.setAccessibleName("本地推文时间线")
         self.setAccessibleDescription(
-            "上下键选择推文；回车阅读详情；空格打开第一项媒体；菜单键显示更多操作。"
+            "上下键选择推文；回车阅读详情；空格打开媒体；Ctrl+L 喜欢；Ctrl+B 整理收藏；菜单键显示更多操作。"
         )
         self.viewport().setAutoFillBackground(True)
+        self.viewport().setBackgroundRole(QtGui.QPalette.ColorRole.Base)
         palette = self.viewport().palette()
         palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#0f1115"))
         self.viewport().setPalette(palette)
@@ -107,6 +110,69 @@ class TimelineView(QtWidgets.QListView):
             self.restore_anchor(anchor)
         self.visible_changed.emit()
         self._fetch_timer.start(0)
+
+    def set_personal_state(
+        self, state: PersonalWorkState, pending: bool = False
+    ) -> None:
+        """局部同步个人动作状态，不重新布局正文或重新加载媒体。"""
+        self.timeline_model.set_personal_state(state, pending)
+
+    def sync_works(
+        self, works: list[LibraryWork], preserve_anchor: bool = True
+    ) -> None:
+        """局部合并个人列表查询，并在锚点消失时保留邻近的阅读作品。"""
+        model = self.timeline_model
+        anchor = self.capture_anchor() if preserve_anchor else None
+        old_keys = [
+            work.key
+            for row in range(model.rowCount())
+            if (work := model.work_at(row)) is not None
+        ]
+        wanted = {work.key for work in works}
+        current = model.work_at(self.currentIndex().row())
+        current_key = current.key if current is not None else ""
+
+        def surviving_neighbor(key: str) -> str:
+            """优先选择原顺序中的后继，尾部删除时再选择前驱。"""
+            if key in wanted:
+                return key
+            if key not in old_keys:
+                return works[0].key if works else ""
+            position = old_keys.index(key)
+            candidates = old_keys[position + 1 :] + list(reversed(old_keys[:position]))
+            return next(
+                (item for item in candidates if item in wanted),
+                works[0].key if works else "",
+            )
+
+        if anchor is not None:
+            anchor = (surviving_neighbor(anchor[0]), anchor[1])
+        current_key = surviving_neighbor(current_key)
+        self._restore_timer.stop()
+        self._pending_anchor = None
+        model.sync_works(works)
+        self.doItemsLayout()
+        row = model.row_for_key(current_key)
+        if row >= 0:
+            self.setCurrentIndex(model.index(row, 0))
+        if anchor is not None and anchor[0]:
+            self.restore_anchor(anchor)
+        elif not preserve_anchor:
+            self.scroll_to_top()
+        self.viewport().update()
+        self.visible_changed.emit()
+        self._fetch_timer.start(0)
+
+    def remove_work(self, key: str) -> bool:
+        """移除一条作品并恢复邻居锚点，最后一条删除时保持当前空列表。"""
+        model = self.timeline_model
+        if model.row_for_key(key) < 0:
+            return False
+        works = [model.work_at(row) for row in range(model.rowCount())]
+        self.sync_works(
+            [work for work in works if work is not None and work.key != key]
+        )
+        return True
 
     def capture_anchor(self) -> tuple[str, int] | None:
         """取得视口顶部推文的稳定主键与行顶部像素偏移。"""
@@ -250,6 +316,24 @@ class TimelineView(QtWidgets.QListView):
             else QtCore.Qt.CursorShape.ArrowCursor
         )
         self.viewport().setCursor(cursor)
+        point = event.position().toPoint()
+        index = self.indexAt(point)
+        work = self.timeline_model.work_at(index.row()) if index.isValid() else None
+        if work is not None:
+            rect = self.visualRect(index)
+            action, _ = self.tweet_delegate.hit_test(
+                work, point - rect.topLeft(), rect.width()
+            )
+            state = self.timeline_model.personal_state(work.key)
+            self.viewport().setToolTip(
+                ("取消喜欢" if state.liked else "喜欢此作品") + "（Ctrl+L）"
+                if action == "like"
+                else "整理收藏夹（Ctrl+B，可同时选择多个）"
+                if action == "bookmark"
+                else ""
+            )
+        else:
+            self.viewport().setToolTip("")
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
         """鼠标离开列表后恢复普通指针。"""
@@ -273,6 +357,15 @@ class TimelineView(QtWidgets.QListView):
         work = self.timeline_model.work_at(index.row()) if index.isValid() else None
         if work is not None:
             key = event.key()
+            if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
+                if key == QtCore.Qt.Key.Key_L:
+                    self.like_requested.emit(work)
+                    event.accept()
+                    return
+                if key == QtCore.Qt.Key.Key_B:
+                    self.bookmark_requested.emit(work)
+                    event.accept()
+                    return
             if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
                 self.open_detail.emit(work)
                 event.accept()
@@ -302,7 +395,11 @@ class TimelineView(QtWidgets.QListView):
         self, work: LibraryWork, action: str, media_index: int, point: QtCore.QPoint
     ) -> None:
         """执行当前作品的明确阅读动作，并在展开时保持阅读位置。"""
-        if action == "menu":
+        if action == "like":
+            self.like_requested.emit(work)
+        elif action == "bookmark":
+            self.bookmark_requested.emit(work)
+        elif action == "menu":
             self.menu_requested.emit(work, self.viewport().mapToGlobal(point))
         elif action == "expand":
             anchor = self.capture_anchor()

@@ -18,6 +18,9 @@ CACHE_DIR = (
 )  # 可删除的媒体预览缓存。
 CONFIG_PATH = APP_DATA_DIR / "config.json"  # 兼容旧版本的用户偏好文件。
 LIBRARY_DB_PATH = APP_DATA_DIR / "library.sqlite3"  # 可从原始目录重建的作品索引。
+PERSONAL_DB_PATH = (
+    APP_DATA_DIR / "personal.sqlite3"
+)  # 喜欢与收藏夹用户数据，不能按缓存删除。
 
 
 def ensure_config_dir() -> None:

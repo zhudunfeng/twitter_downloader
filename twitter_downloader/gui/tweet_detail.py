@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from twitter_downloader.library.models import LibraryWork
+from twitter_downloader.library.models import LibraryWork, PersonalWorkState
 
 
 class TweetDetail(QtWidgets.QDialog):
     """提供可选择的完整正文、文章及媒体入口，不自动读取远程资源。"""
 
     media_requested = QtCore.Signal(object, int)  # 用户点中的作品与媒体序号。
+    like_requested = QtCore.Signal(
+        object
+    )  # 请求切换本地喜欢，持久化由页面共用控制器处理。
+    bookmark_requested = QtCore.Signal(object)  # 请求整理当前作品的多个收藏夹归属。
 
     def __init__(
         self, work: LibraryWork, parent: QtWidgets.QWidget | None = None
@@ -71,6 +75,24 @@ class TweetDetail(QtWidgets.QDialog):
             scroll.setWidget(media_box)
             scroll.setMaximumHeight(70)
             layout.addWidget(scroll)
+        personal_actions = QtWidgets.QHBoxLayout()
+        self.like_button = QtWidgets.QPushButton("喜欢")
+        self.like_button.setCheckable(True)
+        self.like_button.setShortcut(QtGui.QKeySequence("Ctrl+L"))
+        self.like_button.setToolTip("本地喜欢（Ctrl+L）")
+        self.like_button.clicked.connect(self._request_like)
+        personal_actions.addWidget(self.like_button)
+        self.bookmark_button = QtWidgets.QPushButton("收藏")
+        self.bookmark_button.setCheckable(True)
+        self.bookmark_button.setShortcut(QtGui.QKeySequence("Ctrl+B"))
+        self.bookmark_button.setToolTip("整理收藏夹（Ctrl+B，可同时选择多个）")
+        self.bookmark_button.clicked.connect(self._request_bookmark)
+        personal_actions.addWidget(self.bookmark_button)
+        self.personal_status = QtWidgets.QLabel("本地个人标记")
+        self.personal_status.setObjectName("caption")
+        personal_actions.addWidget(self.personal_status, 1)
+        layout.addLayout(personal_actions)
+        self.set_personal_state(PersonalWorkState(work.key))
         actions = QtWidgets.QHBoxLayout()
         copy = QtWidgets.QPushButton("复制正文")
         copy.clicked.connect(self._copy)
@@ -90,6 +112,37 @@ class TweetDetail(QtWidgets.QDialog):
         close.clicked.connect(self.close)
         actions.addWidget(close)
         layout.addLayout(actions)
+
+    def set_personal_state(
+        self, state: PersonalWorkState, pending: bool = False
+    ) -> None:
+        """同步本地按钮与保存反馈，不触碰正文、媒体或原帖公开计数。"""
+        if state.work_key != self.work.key:
+            return
+        self.like_button.setChecked(state.liked)
+        self.like_button.setText("已喜欢" if state.liked else "喜欢")
+        self.like_button.setAccessibleName(
+            "取消本地喜欢" if state.liked else "喜欢此作品"
+        )
+        self.bookmark_button.setChecked(state.bookmarked)
+        self.bookmark_button.setText("整理收藏夹" if state.bookmarked else "收藏")
+        self.bookmark_button.setAccessibleName("整理此作品的收藏夹")
+        self.personal_status.setText(
+            "正在保存…"
+            if pending
+            else f"已加入 {len(state.folder_ids)} 个收藏夹"
+            if state.bookmarked
+            else "本地个人标记"
+        )
+
+    def _request_like(self) -> None:
+        """将本地喜欢请求交给共用控制器，避免详情持有独立数据库。"""
+        self.like_requested.emit(self.work)
+
+    def _request_bookmark(self) -> None:
+        """请求多选收藏夹，不因单击按钮提前更改现有归属。"""
+        self.bookmark_button.setChecked(not self.bookmark_button.isChecked())
+        self.bookmark_requested.emit(self.work)
 
     def _copy(self) -> None:
         """复制完整已保存正文与文章段落。"""

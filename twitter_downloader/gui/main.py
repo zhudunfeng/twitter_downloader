@@ -11,7 +11,14 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from twitter_downloader.core import download_one
 from twitter_downloader.utils import is_tweet_url
 
-from .config import APP_DATA_DIR, CACHE_DIR, LIBRARY_DB_PATH, load_config, save_config
+from .config import (
+    APP_DATA_DIR,
+    CACHE_DIR,
+    LIBRARY_DB_PATH,
+    PERSONAL_DB_PATH,
+    load_config,
+    save_config,
+)
 from .library_page import LibraryPage
 from .resources import (
     ensure_app_metadata,
@@ -97,6 +104,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._config = load_config()  # 兼容旧键名的用户设置快照。
         self._worker: Worker | None = None  # 持有到实际线程结束的下载工作。
         self._library: LibraryPage | None = None  # 延迟创建的作品库页。
+        self._navigation_index = 0  # 当前导航路由；前三项复用同一个作品库页面。
         self._history: list[dict[str, str]] = []  # 当前会话下载记录。
         self._pending_directories: list[
             tuple[str, str]
@@ -114,7 +122,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setStyleSheet(themed_stylesheet())
 
     def _build_ui(self) -> None:
-        """建立左侧导航及作品库、下载、设置三个页面。"""
+        """建立五个导航入口，作品库、喜欢和收藏共用同一阅读页面。"""
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QHBoxLayout(central)
@@ -131,8 +139,14 @@ class MainWindow(QtWidgets.QMainWindow):
         nav.addWidget(self.brand)
         nav.addSpacing(22)
         self.nav_buttons: list[QtWidgets.QPushButton] = []  # 页面顺序对应的导航控件。
-        self._nav_labels = ("作品库", "下载", "设置")  # 宽屏标签与无障碍名称。
-        icons = ("library", "download", "settings")
+        self._nav_labels = (
+            "作品库",
+            "喜欢",
+            "收藏",
+            "下载",
+            "设置",
+        )  # 宽屏标签与无障碍名称。
+        icons = ("library", "like", "bookmark", "download", "settings")
         group = QtWidgets.QButtonGroup(self)
         for index, (label, icon) in enumerate(zip(self._nav_labels, icons)):
             button = QtWidgets.QPushButton(label)
@@ -311,29 +325,46 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self._library = LibraryPage(
-            roots, LIBRARY_DB_PATH, CACHE_DIR, self.library_host
+            roots,
+            LIBRARY_DB_PATH,
+            CACHE_DIR,
+            self.library_host,
+            personal_path=PERSONAL_DB_PATH,
         )
         self._library.roots_changed.connect(self._roots_changed)
         self._library.status_changed.connect(self._library_status)
         self._library.download_requested.connect(self._show_downloads)
         self.loading_label.hide()
         self.library_layout.addWidget(self._library)
+        if self._navigation_index < 3:
+            self._library.set_scope(
+                ("all", "liked", "bookmarked")[self._navigation_index]
+            )
         for path, root in self._pending_directories:
             self._library.index_directory(path, root)
         self._pending_directories.clear()
 
     def _switch_page(self, index: int) -> None:
-        """保持页面与导航一致，离开作品库时暂停媒体。"""
-        if index != 0 and self._library is not None:
+        """将导航路由映射到共用作品页或下载设置页，并同步筛选范围。"""
+        if not 0 <= index < len(self.nav_buttons):
+            return
+        self._navigation_index = index
+        if self._library is not None:
             self._library.pause_playback()
-        self.pages.setCurrentIndex(index)
+        if index < 3:
+            self._ensure_library()
+            if self._library is not None:
+                self._library.set_scope(("all", "liked", "bookmarked")[index])
+            self.pages.setCurrentWidget(self.library_host)
+        else:
+            self.pages.setCurrentIndex(index - 2)
         self.nav_buttons[index].setChecked(True)
-        if index == 1:
+        if index == 3:
             self.url_input.setFocus()
 
     def _show_downloads(self) -> None:
         """响应作品库空状态中的下载入口。"""
-        self._switch_page(1)
+        self._switch_page(3)
 
     def _library_status(self, message: str) -> None:
         """无下载活动时显示目录同步状态。"""
@@ -540,8 +571,10 @@ class MainWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         self._persist_config()
-        if self._library is not None:
-            self._library.shutdown()
+        if self._library is not None and not self._library.shutdown():
+            self.status.setText("喜欢或收藏尚未完成保存，请重试后关闭")
+            event.ignore()
+            return
         super().closeEvent(event)
 
 

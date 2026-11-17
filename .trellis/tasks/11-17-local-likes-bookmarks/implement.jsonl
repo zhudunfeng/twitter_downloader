@@ -1,0 +1,4 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/local-library.md", "reason": "Existing catalog, identity, media and worker contracts"}
+{"file": ".trellis/tasks/11-17-local-likes-bookmarks/research/persistence-and-interactions.md", "reason": "Personal data ownership, many-to-many folders and query boundaries"}

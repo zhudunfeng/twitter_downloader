@@ -50,4 +50,38 @@ class LibraryQuery:
     kind: str = ""  # image、video、text、article；空字符串表示全部。
     since: str = ""  # 含起始日的 ISO 日期，空字符串表示不限。
     until: str = ""  # 含结束日的 ISO 日期，空字符串表示不限。
-    sort: str = "newest"  # newest 为新到旧，oldest 为旧到新。
+    sort: str = "newest"  # newest/oldest 按发表时间，recent 按个人操作时间。
+    scope: str = "all"  # all 全部作品、liked 喜欢、bookmarked 收藏。
+    folder_id: str = ""  # 收藏夹稳定标识；空字符串表示全部收藏。
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalWorkState:
+    """描述独立于下载原件与可重建索引的个人标记。"""
+
+    work_key: str  # 现有根目录限定的作品稳定标识。
+    liked_at: int | None = None  # 当前喜欢的 UTC 毫秒时间，未喜欢时为空。
+    collected_at: int | None = None  # 当前连续收藏周期的首次 UTC 毫秒时间。
+    folder_ids: tuple[str, ...] = ()  # 作品所属的全部收藏夹稳定标识。
+    revision: int = 0  # 该作品个人状态实际变更后的递增版本。
+
+    @property
+    def liked(self) -> bool:
+        """根据喜欢时间判断本地喜欢状态。"""
+        return self.liked_at is not None
+
+    @property
+    def bookmarked(self) -> bool:
+        """仅根据归属关系判断收藏，时间字段不作为收藏开关。"""
+        return bool(self.folder_ids)
+
+
+@dataclass(frozen=True, slots=True)
+class BookmarkFolder:
+    """描述不移动原始下载文件的逻辑收藏夹。"""
+
+    id: str  # 重命名后保持不变的稳定标识。
+    name: str  # 经过统一校验的收藏夹展示名称。
+    is_system: bool  # 是否为禁止重命名和删除的系统默认夹。
+    created_at: int  # 创建时的 UTC 毫秒时间。
+    updated_at: int  # 最近重命名时的 UTC 毫秒时间。

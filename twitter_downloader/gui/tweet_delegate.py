@@ -10,10 +10,10 @@ from datetime import datetime
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from twitter_downloader.library.models import LibraryWork, LocalMedia
+from twitter_downloader.library.models import LibraryWork, LocalMedia, PersonalWorkState
 
 from .thumbnail_service import ThumbnailService
-from .timeline_model import WORK_ROLE
+from .timeline_model import PENDING_ROLE, PERSONAL_ROLE, WORK_ROLE
 
 BACKGROUND = QtGui.QColor("#0f1115")  # 时间线默认底色，与应用深色主题一致。
 HOVER_BACKGROUND = QtGui.QColor("#141a21")  # 鼠标所在推文的轻量背景反馈。
@@ -22,6 +22,7 @@ TEXT_COLOR = QtGui.QColor("#e7e9ea")  # 正文与作者名称的高对比文字�
 MUTED_COLOR = QtGui.QColor("#94a3b1")  # 账号、日期和已保存计数的次要文字色。
 LINE_COLOR = QtGui.QColor("#26313d")  # 推文分隔线与媒体边框颜色。
 ACCENT_COLOR = QtGui.QColor("#1d9bf0")  # 展开、阅读及键盘焦点的蓝色强调。
+LIKE_COLOR = QtGui.QColor("#f472a6")  # 已喜欢动作的粉色强调，配合填充与文字表达状态。
 MEDIA_BACKGROUND = QtGui.QColor("#1c2732")  # 尚无可用封面时的中性占位色。
 LAYOUT_CACHE_LIMIT = 256  # 保留最近布局的条数，限制长列表测量对象占用。
 COLLAPSED_TEXT_LIMIT = 176  # 折叠正文的最大逻辑像素高度。
@@ -53,7 +54,10 @@ class TweetLayout:
     article: QtCore.QRect  # 已保存文章或来源链接的详情入口。
     media: tuple[QtCore.QRect, ...]  # 原始顺序前四项媒体的内嵌区域。
     warning: QtCore.QRect  # 不完整作品提示区域。
-    footer: QtCore.QRect  # 保存计数及详情入口区域。
+    footer: QtCore.QRect  # 下载时保存的公开互动计数区域。
+    like: QtCore.QRect  # 本地喜欢动作的绘制与命中区域。
+    bookmark: QtCore.QRect  # 多收藏夹选择动作的绘制与命中区域。
+    detail: QtCore.QRect  # 阅读详情动作的绘制与命中区域。
 
 
 class TweetDelegate(QtWidgets.QStyledItemDelegate):
@@ -155,10 +159,16 @@ class TweetDelegate(QtWidgets.QStyledItemDelegate):
         if work.warning:
             warning = QtCore.QRect(left, y, content_width, 23)
             y += 26
-        footer = QtCore.QRect(left, y, content_width, 28)
+        footer = QtCore.QRect(left, y, content_width, 24)
+        action_width = content_width // 3
+        like = QtCore.QRect(left, y + 24, action_width, 44)
+        bookmark = QtCore.QRect(left + action_width, y + 24, action_width, 44)
+        detail = QtCore.QRect(
+            left + action_width * 2, y + 24, content_width - action_width * 2, 44
+        )
         return TweetLayout(
             width,
-            max(106, y + 42),
+            max(146, y + 78),
             avatar,
             header,
             menu,
@@ -169,6 +179,9 @@ class TweetDelegate(QtWidgets.QStyledItemDelegate):
             media_rects,
             warning,
             footer,
+            like,
+            bookmark,
+            detail,
         )
 
     def _text_document(self, text: str, width: int) -> QtGui.QTextDocument:
@@ -321,7 +334,16 @@ class TweetDelegate(QtWidgets.QStyledItemDelegate):
                     QtCore.Qt.AlignmentFlag.AlignCenter,
                     f"+{len(work.media) - 4} · 查看全部",
                 )
-        self._paint_footer(painter, work, layout)
+        state = index.data(PERSONAL_ROLE)
+        self._paint_footer(
+            painter,
+            work,
+            layout,
+            state
+            if isinstance(state, PersonalWorkState)
+            else PersonalWorkState(work.key),
+            bool(index.data(PENDING_ROLE)),
+        )
         if option.state & QtWidgets.QStyle.StateFlag.State_HasFocus:
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
             painter.setPen(QtGui.QPen(ACCENT_COLOR, 2))
@@ -493,9 +515,14 @@ class TweetDelegate(QtWidgets.QStyledItemDelegate):
         painter.drawRoundedRect(rect, 11, 11)
 
     def _paint_footer(
-        self, painter: QtGui.QPainter, work: LibraryWork, layout: TweetLayout
+        self,
+        painter: QtGui.QPainter,
+        work: LibraryWork,
+        layout: TweetLayout,
+        state: PersonalWorkState,
+        pending: bool,
     ) -> None:
-        """显示历史互动快照与详情入口，不构造虚假的社交按钮。"""
+        """分行显示原帖快照与本地动作，个人喜欢不更改保存的公开计数。"""
         painter.setFont(self._meta_font)
         painter.setPen(MUTED_COLOR)
         metrics = QtGui.QFontMetrics(self._meta_font)
@@ -513,11 +540,15 @@ class TweetDelegate(QtWidgets.QStyledItemDelegate):
         values = [
             ("回复", work.reply_count),
             ("转发", work.retweet_count),
-            ("喜欢", work.like_count),
+            ("赞", work.like_count),
         ]
         parts = [f"{label} {value:,}" for label, value in values if value is not None]
-        snapshot = "   ".join(parts) or "本地保存"
-        counts = layout.footer.adjusted(0, 0, -78, 0)
+        snapshot = (
+            "原帖快照 · " + "   ".join(parts) if parts else "本地保存 · 仅离线标记"
+        )
+        if pending:
+            snapshot = "保存中 · " + snapshot
+        counts = layout.footer
         painter.drawText(
             counts,
             QtCore.Qt.AlignmentFlag.AlignVCenter,
@@ -525,11 +556,87 @@ class TweetDelegate(QtWidgets.QStyledItemDelegate):
                 snapshot, QtCore.Qt.TextElideMode.ElideRight, max(0, counts.width())
             ),
         )
+        self._paint_personal_action(
+            painter,
+            layout.like,
+            "like",
+            state.liked,
+            "已喜欢" if state.liked else "喜欢",
+        )
+        self._paint_personal_action(
+            painter,
+            layout.bookmark,
+            "bookmark",
+            state.bookmarked,
+            "已收藏" if state.bookmarked else "收藏",
+        )
         painter.setPen(ACCENT_COLOR)
         painter.drawText(
-            layout.footer,
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
-            "查看详情 ›",
+            layout.detail,
+            QtCore.Qt.AlignmentFlag.AlignCenter,
+            metrics.elidedText(
+                "查看详情 ›", QtCore.Qt.TextElideMode.ElideRight, layout.detail.width()
+            ),
+        )
+
+    def _paint_personal_action(
+        self,
+        painter: QtGui.QPainter,
+        rect: QtCore.QRect,
+        kind: str,
+        checked: bool,
+        label: str,
+    ) -> None:
+        """以相同描边绘制心形与书签，并用实心和文字同时表达选中状态。"""
+        color = (
+            LIKE_COLOR
+            if kind == "like" and checked
+            else ACCENT_COLOR
+            if checked
+            else MUTED_COLOR
+        )
+        icon = QtCore.QRectF(rect.x() + 3, rect.center().y() - 9, 18, 18)
+        path = QtGui.QPainterPath()
+        if kind == "like":
+            path.moveTo(9, 16)
+            path.cubicTo(6, 13, 1, 10, 1, 5.8)
+            path.cubicTo(1, 0.7, 6.8, 0, 9, 4)
+            path.cubicTo(11.2, 0, 17, 0.7, 17, 5.8)
+            path.cubicTo(17, 10, 12, 13, 9, 16)
+            path.closeSubpath()
+        else:
+            path.moveTo(3, 1)
+            path.lineTo(15, 1)
+            path.lineTo(15, 17)
+            path.lineTo(9, 13)
+            path.lineTo(3, 17)
+            path.closeSubpath()
+        painter.save()
+        painter.translate(icon.topLeft())
+        painter.setPen(
+            QtGui.QPen(
+                color,
+                1.6,
+                QtCore.Qt.PenStyle.SolidLine,
+                QtCore.Qt.PenCapStyle.RoundCap,
+                QtCore.Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.setBrush(
+            QtGui.QBrush(color)
+            if checked
+            else QtGui.QBrush(QtCore.Qt.BrushStyle.NoBrush)
+        )
+        painter.drawPath(path)
+        painter.restore()
+        painter.setPen(color)
+        text_rect = rect.adjusted(28, 0, -3, 0)
+        painter.drawText(
+            text_rect,
+            QtCore.Qt.AlignmentFlag.AlignVCenter,
+            QtGui.QFontMetrics(self._meta_font).elidedText(
+                label, QtCore.Qt.TextElideMode.ElideRight, max(0, text_rect.width())
+            ),
         )
 
     def hit_test(
@@ -537,6 +644,10 @@ class TweetDelegate(QtWidgets.QStyledItemDelegate):
     ) -> tuple[str, int]:
         """使用绘制共用区域判定更多、展开、媒体或详情操作。"""
         layout = self.layout_for(work, width)
+        if layout.like.contains(point):
+            return "like", -1
+        if layout.bookmark.contains(point):
+            return "bookmark", -1
         if layout.menu.contains(point):
             return "menu", -1
         if layout.expand.contains(point):

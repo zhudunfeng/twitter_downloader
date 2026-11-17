@@ -65,6 +65,23 @@ def navigation_icon(name: str) -> QtGui.QIcon:
         outline.lineTo(19, 21)
         outline.lineTo(19, 9)
         painter.drawPath(outline)
+    elif name == "like":
+        heart = QtGui.QPainterPath()
+        heart.moveTo(12, 21)
+        heart.cubicTo(8, 17, 2, 13, 2, 8)
+        heart.cubicTo(2, 2, 9, 1, 12, 6)
+        heart.cubicTo(15, 1, 22, 2, 22, 8)
+        heart.cubicTo(22, 13, 16, 17, 12, 21)
+        painter.drawPath(heart)
+    elif name == "bookmark":
+        bookmark = QtGui.QPainterPath()
+        bookmark.moveTo(6, 3)
+        bookmark.lineTo(18, 3)
+        bookmark.lineTo(18, 22)
+        bookmark.lineTo(12, 17)
+        bookmark.lineTo(6, 22)
+        bookmark.closeSubpath()
+        painter.drawPath(bookmark)
     elif name == "download":
         painter.drawLine(12, 3, 12, 15)
         painter.drawLine(7, 10, 12, 15)
@@ -171,6 +188,7 @@ def themed_stylesheet() -> str:
     QPushButton#secondary { background: #19232e; color: #d9e3ef; padding: 8px 13px; border: 1px solid #304151; border-radius: 16px; }
     QPushButton#secondary:hover { background: #26384a; }
     QFrame#timelineColumn { border-right: 1px solid #29313b; }
+    QListView#tweetTimeline { background: #0f1115; }
     QWidget#timelineHeader, QWidget#timelineTabs { background: #0f1115; }
     QWidget#timelineTabs { border-bottom: 1px solid #29313b; }
     QLabel#pageTitle { font-size: 24px; font-weight: 700; }

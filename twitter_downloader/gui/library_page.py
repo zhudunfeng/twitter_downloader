@@ -9,12 +9,20 @@ from typing import Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from twitter_downloader.library.models import LibraryQuery, LibraryWork
+from twitter_downloader.library.models import (
+    BookmarkFolder,
+    LibraryQuery,
+    LibraryWork,
+    PersonalWorkState,
+)
+from twitter_downloader.library.personal_state import DEFAULT_FOLDER_ID
 from twitter_downloader.library.reader import read_work
 from twitter_downloader.library.repository import LibraryRepository
 from twitter_downloader.library.scanner import LibraryScanner
 
+from .bookmark_folders import BookmarkFolderManager, BookmarkFolderPicker
 from .image_viewer import ImageViewer
+from .personal_state_controller import PersonalStateController
 from .thumbnail_service import ThumbnailService
 from .timeline_view import TimelineView
 from .tweet_detail import TweetDetail
@@ -46,6 +54,8 @@ class _LibraryJob(QtCore.QThread):
         directory: str = "",
         root: str = "",
         preserve_anchor: bool = True,
+        personal_path: Path | None = None,
+        reconcile: bool = False,
     ) -> None:
         """记录作业配置；分页限制、版本号和保留锚点均由页面显式传入。"""
         super().__init__(parent)
@@ -59,13 +69,15 @@ class _LibraryJob(QtCore.QThread):
         self.directory = directory  # 单个下载完成目录。
         self.root = root  # 下载目录所属根目录。
         self.preserve_anchor = preserve_anchor  # 查询替换时是否保留阅读位置。
+        self.personal_path = personal_path  # 已初始化的独立个人数据库，仅供查询附加。
+        self.reconcile = reconcile  # 个人列表变更后采用按键合并，避免重置整个模型。
         self._last_progress: float = 0  # 扫描进度节流时间。
 
     def run(self) -> None:
         """执行扫描或查询，确保连接在同一工作线程内创建和关闭。"""
         repository: LibraryRepository | None = None
         try:
-            repository = LibraryRepository(self.db_path)
+            repository = LibraryRepository(self.db_path, self.personal_path)
             payload: dict[str, Any] = {
                 "action": self.action,
                 "generation": self.generation,
@@ -78,15 +90,27 @@ class _LibraryJob(QtCore.QThread):
                 work = read_work(self.directory, self.root)
                 repository.upsert(work)
                 payload["work"] = work
+                if (
+                    self.action == "open"
+                    and self.personal_path is not None
+                    and not repository.personal_error
+                ):
+                    payload["states"] = repository.personal_states([work.key])
             else:
+                works = repository.query(
+                    self.query, offset=self.offset, limit=self.limit
+                )
                 payload.update(
-                    works=repository.query(
-                        self.query, offset=self.offset, limit=self.limit
-                    ),
+                    works=works,
                     total=repository.count(self.query),
+                    states=repository.personal_states([work.key for work in works])
+                    if self.personal_path is not None and not repository.personal_error
+                    else {},
+                    personal_error=repository.personal_error,
                     authors=repository.authors() if self.offset == 0 else None,
                     offset=self.offset,
                     preserve_anchor=self.preserve_anchor,
+                    reconcile=self.reconcile,
                 )
             if not self.isInterruptionRequested():
                 self.result.emit(payload)
@@ -118,6 +142,8 @@ class LibraryPage(QtWidgets.QWidget):
         db_path: Path,
         cache_dir: Path,
         parent: QtWidgets.QWidget | None = None,
+        *,
+        personal_path: Path | None = None,
     ) -> None:
         """建立轻量界面，并延迟启动索引读取与历史作品扫描。"""
         super().__init__(parent)
@@ -125,11 +151,30 @@ class LibraryPage(QtWidgets.QWidget):
             dict.fromkeys(str(Path(root).resolve()) for root in roots)
         )  # 去重后的作品位置。
         self.db_path = db_path  # 可随时重建的目录索引。
+        self.personal_path = personal_path or db_path.with_name(
+            "personal.sqlite3"
+        )  # 持久个人数据，与索引独立。
+        self._scope = "all"  # 当前作品范围：全部、喜欢或收藏。
+        self._folder_id = ""  # 当前收藏夹；空值表示全部收藏。
+        self._last_folder_id = ""  # 在导航间切换时保留最后查看的收藏夹。
+        self._scope_sessions: dict[
+            tuple[str, str], tuple[LibraryQuery, tuple[str, int] | None, int]
+        ] = {}  # 各列表的会话筛选、像素锚点和已加载区间。
+        self._scope_anchor: tuple[str, int] | None = (
+            None  # 等待当前范围查询完成后恢复的锚点。
+        )
+        self._picker_saves: dict[
+            str, BookmarkFolderPicker
+        ] = {}  # 等待归属事务确认的窗口。
+        self._folder_create_target: BookmarkFolderPicker | None = (
+            None  # 本次创建收藏夹的选择窗口。
+        )
         self._jobs: list[_LibraryJob] = []  # 页面拥有的后台线程。
         self._closing: bool = False  # 阻止退出过程创建新工作。
         self._query_busy: bool = False  # 查询串行化，避免输入洪泛。
         self._pending_query: dict[str, Any] | None = None  # 只保留最后一次待查询请求。
         self._generation: int = 0  # 当前筛选版本。
+        self._personal_query_failed = False  # 读取错误独立于写入失败，重试时重新查询。
         self._total: int = 0  # 当前筛选下的作品总数。
         self._kind: str = ""  # 当前媒体类型筛选。
         self._active_media: tuple[str, int] | None = (
@@ -157,6 +202,20 @@ class LibraryPage(QtWidgets.QWidget):
         self.search_timer.setInterval(SEARCH_DELAY_MS)
         self.search_timer.timeout.connect(self._filters_changed)
         self.search.textChanged.connect(self._schedule_search)
+        self.personal_timer = QtCore.QTimer(self)
+        self.personal_timer.setSingleShot(True)
+        self.personal_timer.setInterval(
+            40
+        )  # 合并连续确认的个人动作，只重查一次当前范围。
+        self.personal_timer.timeout.connect(self._reconcile_personal)
+        self.personal = PersonalStateController(self.personal_path, self)
+        self.personal.ready.connect(self._personal_ready)
+        self.personal.state_changed.connect(self._personal_state_changed)
+        self.personal.folders_changed.connect(self._folders_changed)
+        self.personal.operation_finished.connect(self._personal_operation_finished)
+        self.personal.operation_failed.connect(self._personal_operation_failed)
+        self.personal.failed.connect(self._personal_failed)
+        self.personal.busy_changed.connect(self._personal_busy_changed)
         QtCore.QTimer.singleShot(0, self._initial_load)
 
     def _build_ui(self) -> None:
@@ -175,9 +234,9 @@ class LibraryPage(QtWidgets.QWidget):
         top = QtWidgets.QHBoxLayout(header)
         top.setContentsMargins(22, 18, 18, 14)
         titles = QtWidgets.QVBoxLayout()
-        title = QtWidgets.QLabel("作品库")
-        title.setObjectName("pageTitle")
-        titles.addWidget(title)
+        self.title = QtWidgets.QLabel("作品库")
+        self.title.setObjectName("pageTitle")
+        titles.addWidget(self.title)
         self.count_label = QtWidgets.QLabel("本地推文 · 离线阅读")
         self.count_label.setObjectName("caption")
         titles.addWidget(self.count_label)
@@ -200,6 +259,20 @@ class LibraryPage(QtWidgets.QWidget):
         search_layout.setContentsMargins(18, 0, 18, 12)
         search_layout.addWidget(self.search)
         center_layout.addWidget(search_box)
+        self.folder_bar = QtWidgets.QWidget()
+        folder_layout = QtWidgets.QHBoxLayout(self.folder_bar)
+        folder_layout.setContentsMargins(18, 0, 18, 12)
+        self.folder_selector = QtWidgets.QComboBox()
+        self.folder_selector.setAccessibleName("查看收藏夹")
+        self.folder_selector.addItem("全部收藏", "")
+        self.folder_selector.currentIndexChanged.connect(self._folder_selected)
+        folder_layout.addWidget(self.folder_selector, 1)
+        self.manage_folders = QtWidgets.QPushButton("管理收藏夹")
+        self.manage_folders.setObjectName("secondary")
+        self.manage_folders.clicked.connect(self._open_folder_manager)
+        folder_layout.addWidget(self.manage_folders)
+        self.folder_bar.hide()
+        center_layout.addWidget(self.folder_bar)
         tabs_widget = QtWidgets.QWidget()
         tabs_widget.setObjectName("timelineTabs")
         tabs = QtWidgets.QHBoxLayout(tabs_widget)
@@ -238,12 +311,20 @@ class LibraryPage(QtWidgets.QWidget):
         self.feedback.setObjectName("libraryFeedback")
         self.feedback.hide()
         center_layout.addWidget(self.feedback)
+        self.personal_retry = QtWidgets.QPushButton("重试个人数据")
+        self.personal_retry.setObjectName("secondary")
+        self.personal_retry.clicked.connect(self._retry_personal)
+        self.personal_retry.hide()
+        center_layout.addWidget(self.personal_retry)
         self.content = QtWidgets.QStackedWidget()
         self.view = TimelineView(self.thumbnails)
+        self.view.setObjectName("tweetTimeline")
         self.view.setAccessibleName("本地推文时间线")
         self.view.open_detail.connect(self._open_detail)
         self.view.open_media.connect(self._open_media)
         self.view.menu_requested.connect(self._show_menu)
+        self.view.like_requested.connect(self._toggle_like)
+        self.view.bookmark_requested.connect(self._open_bookmark_picker)
         self.view.visible_changed.connect(self._position_player)
         self.view.near_end.connect(self._load_more)
         self.content.addWidget(self.view)
@@ -251,7 +332,7 @@ class LibraryPage(QtWidgets.QWidget):
         empty_layout = QtWidgets.QVBoxLayout(self.empty)
         empty_layout.setContentsMargins(30, 40, 30, 40)
         empty_layout.addStretch(1)
-        self.empty_title = QtWidgets.QLabel("你的收藏，从这里开始")
+        self.empty_title = QtWidgets.QLabel("你的作品库，从这里开始")
         self.empty_title.setObjectName("emptyTitle")
         self.empty_title.setWordWrap(True)
         empty_layout.addWidget(self.empty_title)
@@ -282,7 +363,7 @@ class LibraryPage(QtWidgets.QWidget):
         rail = QtWidgets.QVBoxLayout(self.right_rail)
         rail.setContentsMargins(22, 24, 22, 22)
         rail.setSpacing(14)
-        rail_title = QtWidgets.QLabel("发现你的收藏")
+        rail_title = QtWidgets.QLabel("重温本地作品")
         rail_title.setObjectName("sectionTitle")
         rail.addWidget(rail_title)
         hint = QtWidgets.QLabel("按作者、时间或类型，\n找到想重温的那条推文。")
@@ -340,7 +421,7 @@ class LibraryPage(QtWidgets.QWidget):
         self.cancel_scan.hide()
         rail.addWidget(self.cancel_scan)
         rail.addStretch(1)
-        offline = QtWidgets.QLabel("仅浏览本地文件\n互动数据为下载时的记录")
+        offline = QtWidgets.QLabel("喜欢与收藏仅保存在本地\n原帖计数为下载时的记录")
         offline.setObjectName("caption")
         rail.addWidget(offline)
         self.columns.addWidget(self.right_rail)
@@ -365,20 +446,388 @@ class LibraryPage(QtWidgets.QWidget):
             if self.use_dates.isChecked()
             else "",
             sort=str(self.sort.currentData() or "newest"),
+            scope=self._scope,
+            folder_id=self._folder_id,
         )
+
+    def set_scope(self, scope: str, folder_id: str | None = None) -> None:
+        """在同一阅读器内切换作品范围，恢复各列表的筛选和阅读位置。"""
+        if scope not in ("all", "liked", "bookmarked"):
+            raise ValueError("未知的作品列表范围")
+        target = (
+            (folder_id if folder_id is not None else self._last_folder_id)
+            if scope == "bookmarked"
+            else ""
+        )
+        if (scope, target) == (self._scope, self._folder_id):
+            return
+        self.search_timer.stop()
+        self.personal_timer.stop()
+        self._scope_sessions[(self._scope, self._folder_id)] = (
+            self._query(),
+            self.view.capture_anchor(),
+            max(PAGE_SIZE, self.view.timeline_model.rowCount()),
+        )
+        self.pause_playback()
+        self._scope, self._folder_id = scope, target
+        if scope == "bookmarked":
+            self._last_folder_id = target
+        session = self._scope_sessions.get((scope, target))
+        query = (
+            session[0]
+            if session
+            else LibraryQuery(
+                scope=scope,
+                folder_id=target,
+                sort="newest" if scope == "all" else "recent",
+            )
+        )
+        widgets = (
+            self.search,
+            self.author,
+            self.sort,
+            self.use_dates,
+            self.since,
+            self.until,
+            self.folder_selector,
+        )
+        blockers = [QtCore.QSignalBlocker(widget) for widget in widgets]
+        self.search.setText(query.search)
+        author_index = self.author.findData(query.author)
+        if author_index < 0:
+            self.author.addItem(f"@{query.author}", query.author)
+            author_index = self.author.count() - 1
+        self.author.setCurrentIndex(author_index)
+        self.sort.clear()
+        if scope != "all":
+            label = (
+                "最近喜欢优先"
+                if scope == "liked"
+                else ("最近加入优先" if target else "最近收藏优先")
+            )
+            self.sort.addItem(label, "recent")
+        self.sort.addItem("最新发布优先", "newest")
+        self.sort.addItem("最早发布优先", "oldest")
+        self.sort.setCurrentIndex(max(0, self.sort.findData(query.sort)))
+        self._kind = query.kind
+        self.kind_buttons[query.kind].setChecked(True)
+        self.use_dates.setChecked(bool(query.since or query.until))
+        for edit, value in ((self.since, query.since), (self.until, query.until)):
+            if value:
+                edit.setDate(QtCore.QDate.fromString(value, "yyyy-MM-dd"))
+            edit.setEnabled(self.use_dates.isChecked())
+        self.folder_selector.setCurrentIndex(
+            max(0, self.folder_selector.findData(target))
+        )
+        del blockers
+        self.title.setText(
+            {"all": "作品库", "liked": "喜欢", "bookmarked": "收藏"}[scope]
+        )
+        self.view.setAccessibleName(f"{self.title.text()}推文时间线")
+        self.folder_bar.setVisible(scope == "bookmarked")
+        self.new_banner.hide()
+        self._scope_anchor = session[1] if session else None
+        self._generation += 1
+        self._pending_query = None
+        self._request_query(0, session[2] if session else PAGE_SIZE, False)
+
+    def _folder_selected(self, index: int) -> None:
+        """把收藏夹选择映射为独立的查询范围。"""
+        if index >= 0:
+            self.set_scope(
+                "bookmarked", str(self.folder_selector.itemData(index) or "")
+            )
+
+    def _update_empty_state(self) -> None:
+        """按照当前范围显示数量和空态，避免把喜欢与普通作品库混淆。"""
+        self.count_label.setText(f"{self._total:,} 条作品 · 本地离线阅读")
+        self.content.setCurrentWidget(self.view if self._total else self.empty)
+        filtered = bool(
+            self.search.text()
+            or self._kind
+            or self.author.currentData()
+            or self.use_dates.isChecked()
+        )
+        title, help_text = {
+            "all": (
+                "你的作品库，从这里开始",
+                "导入已有下载目录，或下载第一条推文。\n文字、图片和视频将在这里一起呈现。",
+            ),
+            "liked": ("还没有喜欢的作品", "在推文下方点击喜欢，即可在这里重温。"),
+            "bookmarked": (
+                "这个收藏夹还是空的" if self._folder_id else "还没有收藏的作品",
+                "点击推文下方的收藏，可将作品加入一个或多个收藏夹。",
+            ),
+        }[self._scope]
+        self.empty_title.setText("没有找到匹配的作品" if filtered else title)
+        self.empty_help.setText(
+            "试试其他关键词，或重置筛选条件。" if filtered else help_text
+        )
+
+    def _show_personal_unavailable(self) -> None:
+        """个人数据库失败时明确显示不可用，不能冒充零条收藏。"""
+        # 丢弃报错前已经发出的快照，避免在途成功结果把错误态重新填成旧列表。
+        self._generation += 1
+        self._pending_query = None
+        self._personal_query_failed = True
+        self.personal_timer.stop()
+        self.view.set_works([], False)
+        self.count_label.setText("个人数据暂不可用")
+        self.content.setCurrentWidget(self.empty)
+        self.empty_title.setText("暂时无法读取喜欢与收藏")
+        self.empty_help.setText(
+            "个人记录已保留。请查看错误提示并重试；仍可在作品库阅读本地文件。"
+        )
+        self._sync_personal_retry()
+        self._position_player()
+
+    def _personal_ready(self, folders: tuple[BookmarkFolder, ...]) -> None:
+        """个人存储准备完成后接入筛选与当前页状态。"""
+        if self._closing:
+            return
+        self._sync_personal_retry()
+        self._folders_changed(folders)
+        self._reload(True, reconcile=True)
+
+    def _personal_state_changed(self, state: PersonalWorkState) -> None:
+        """同步时间线和所有打开的详情，不重新解码媒体或重置模型。"""
+        if self._closing:
+            return
+        pending = self.personal.is_pending(state.work_key)
+        self.view.set_personal_state(state, pending)
+        for dialog in self._dialogs:
+            if isinstance(dialog, TweetDetail) and dialog.work.key == state.work_key:
+                dialog.set_personal_state(state, pending)
+
+    def _matches_personal_scope(self, state: PersonalWorkState) -> bool:
+        """判断确认后的状态是否仍属于当前个人列表。"""
+        if self._scope == "liked":
+            return state.liked
+        if self._scope == "bookmarked":
+            return (
+                self._folder_id in state.folder_ids
+                if self._folder_id
+                else state.bookmarked
+            )
+        return True
+
+    def _personal_operation_finished(self, action: str, result: object) -> None:
+        """事务确认后关闭保存窗口并按键校正当前个人列表的分页。"""
+        if self._closing:
+            return
+        self._sync_personal_retry()
+        if action == "set_folders" and isinstance(result, PersonalWorkState):
+            dialog = self._picker_saves.pop(result.work_key, None)
+            if dialog is not None and dialog in self._dialogs:
+                dialog.accept()
+        if action == "create_folder" and isinstance(result, BookmarkFolder):
+            dialog = self._folder_create_target
+            self._folder_create_target = None
+            if dialog is not None and dialog in self._dialogs:
+                dialog.set_folders(self.personal.folders, select_id=result.id)
+        if self._scope != "all":
+            # 提前使在途查询失效，防止已取消的作品被旧分页快照重新加入。
+            self._generation += 1
+            self._pending_query = None
+            states = (
+                [result]
+                if isinstance(result, PersonalWorkState)
+                else list(result.values())
+                if isinstance(result, dict)
+                else []
+            )
+            for state in states:
+                if (
+                    isinstance(state, PersonalWorkState)
+                    and not self._matches_personal_scope(
+                        self.personal.state_for(state.work_key)
+                    )
+                    and self.view.remove_work(state.work_key)
+                ):
+                    self._total = max(0, self._total - 1)
+            self._update_empty_state()
+            self._position_player()
+            self.personal_timer.start()
+
+    def _reconcile_personal(self) -> None:
+        """从当前已加载区间重读并差分合并，修正移除造成的 OFFSET 位移。"""
+        if not self._closing and self._scope != "all":
+            self._reload(True, reconcile=True)
+
+    def _folders_changed(self, folders: tuple[BookmarkFolder, ...]) -> None:
+        """同步收藏夹标签和所有打开的选择器，删除当前夹时返回全部收藏。"""
+        if self._closing:
+            return
+        ids = {folder.id for folder in folders}
+        blocker = QtCore.QSignalBlocker(self.folder_selector)
+        self.folder_selector.clear()
+        self.folder_selector.addItem("全部收藏", "")
+        for folder in folders:
+            self.folder_selector.addItem(folder.name, folder.id)
+        self.folder_selector.setCurrentIndex(
+            max(0, self.folder_selector.findData(self._folder_id))
+        )
+        del blocker
+        for dialog in self._dialogs:
+            if isinstance(dialog, (BookmarkFolderPicker, BookmarkFolderManager)):
+                dialog.set_folders(folders)
+                dialog.set_busy(self.personal.busy)
+        if self._last_folder_id and self._last_folder_id not in ids:
+            self._last_folder_id = ""
+        if self._folder_id and self._folder_id not in ids:
+            self.set_scope("bookmarked", "")
+
+    def _personal_busy_changed(self, busy: bool) -> None:
+        """异步保存期间锁定收藏夹表单，避免同一窗口重复提交。"""
+        self._sync_personal_retry()
+        for dialog in self._dialogs:
+            if isinstance(dialog, (BookmarkFolderPicker, BookmarkFolderManager)):
+                dialog.set_busy(busy)
+
+    def _personal_operation_failed(self, action: str, key: str) -> None:
+        """只清除失败请求关联，保留其他已接受事务的表单确认关系。"""
+        if action == "set_folders":
+            self._picker_saves.pop(key, None)
+        elif action == "create_folder":
+            self._folder_create_target = None
+
+    def _sync_personal_retry(self) -> None:
+        """区分重开数据库、重试保存和重读列表，并在写入期间禁用重试。"""
+        write_failed = self.personal.has_failed_operation and self.personal.available
+        self.personal_retry.setText(
+            "重试未保存操作" if write_failed else "重试个人数据"
+        )
+        self.personal_retry.setVisible(
+            write_failed
+            or self._personal_query_failed
+            or (not self.personal.available and bool(self.personal.last_error))
+        )
+        self.personal_retry.setEnabled(not self.personal.busy and not self._closing)
+
+    def _personal_failed(self, message: str) -> None:
+        """显示可重试的中文错误，并让表单保留未保存的选择。"""
+        self._show_error(message)
+        for dialog in self._dialogs:
+            if isinstance(dialog, (BookmarkFolderPicker, BookmarkFolderManager)):
+                dialog.show_error(message, busy=self.personal.busy)
+        self._sync_personal_retry()
+        if not self.personal.available and self._scope != "all":
+            self._show_personal_unavailable()
+
+    def _retry_personal(self) -> None:
+        """重试失败写入或初始化；只有读取失败时重新查询当前范围。"""
+        if self.personal.busy or self._closing:
+            return
+        accepted = self.personal.retry()
+        if not accepted and self.personal.available:
+            self._reload(True, reconcile=True)
+        self._sync_personal_retry()
+
+    def _toggle_like(self, work: LibraryWork) -> None:
+        """提交本地喜欢的目标状态，原帖点赞数保持下载时快照。"""
+        if not self.personal.available:
+            self._personal_failed("喜欢与收藏暂不可用，请重试个人数据。")
+            return
+        state = self.personal.state_for(work.key)
+        self.personal.set_liked(work.key, not state.liked)
+
+    def _open_bookmark_picker(self, work: LibraryWork) -> None:
+        """打开多收藏夹选择器，同一作品只保留一个整理窗口。"""
+        if not self.personal.available:
+            self._personal_failed("喜欢与收藏暂不可用，请重试个人数据。")
+            return
+        for dialog in self._dialogs:
+            if (
+                isinstance(dialog, BookmarkFolderPicker)
+                and dialog.property("work_key") == work.key
+            ):
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+        state = self.personal.state_for(work.key)
+        dialog = BookmarkFolderPicker(
+            self.personal.folders,
+            state.folder_ids or (DEFAULT_FOLDER_ID,),
+            self,
+            collected=state.bookmarked,
+        )
+        dialog.setProperty("work_key", work.key)
+        dialog.saved.connect(
+            lambda ids, current=dialog: self._save_picker(work.key, current, ids)
+        )
+        dialog.cancel_all_requested.connect(
+            lambda: self._save_picker(work.key, dialog, ())
+        )
+        dialog.create_requested.connect(
+            lambda name, current=dialog: self._create_folder_from_picker(current, name)
+        )
+        dialog.set_busy(self.personal.busy)
+        self._show_dialog(dialog)
+
+    def _save_picker(
+        self, key: str, dialog: BookmarkFolderPicker, ids: tuple[str, ...]
+    ) -> None:
+        """在一次事务中替换完整归属集合，确认后才关闭选择器。"""
+        dialog.set_busy(True)
+        if self.personal.set_folders(key, ids):
+            self._picker_saves[key] = dialog
+        else:
+            dialog.set_busy(self.personal.busy)
+
+    def _create_folder_from_picker(
+        self, dialog: BookmarkFolderPicker, name: str
+    ) -> None:
+        """创建后仅在发起请求的选择器中勾选新收藏夹。"""
+        dialog.set_busy(True)
+        if self.personal.create_folder(name):
+            self._folder_create_target = dialog
+        else:
+            dialog.set_busy(self.personal.busy)
+
+    def _open_folder_manager(self) -> None:
+        """复用后台控制器管理收藏夹，不在界面线程执行数据库操作。"""
+        if not self.personal.available:
+            self._personal_failed("收藏夹暂不可用，请重试个人数据。")
+            return
+        for dialog in self._dialogs:
+            if isinstance(dialog, BookmarkFolderManager):
+                dialog.raise_()
+                return
+        dialog = BookmarkFolderManager(self.personal.folders, self)
+        dialog.create_requested.connect(self.personal.create_folder)
+        dialog.rename_requested.connect(self.personal.rename_folder)
+        dialog.delete_requested.connect(self.personal.delete_folder)
+        dialog.set_busy(self.personal.busy)
+        self._show_dialog(dialog)
+
+    def _job_failed(self, job: _LibraryJob, message: str) -> None:
+        """忽略过期查询错误，当前个人范围失败时展示明确错误态。"""
+        if job.action == "query":
+            if job.generation != self._generation:
+                return
+            if self._scope != "all":
+                self._show_personal_unavailable()
+        self._show_error(message)
 
     def _start_job(self, job: _LibraryJob) -> None:
         """统一保留线程引用并连接失败、结果与清理入口。"""
         self._jobs.append(job)
         job.result.connect(self._job_result)
-        job.failure.connect(self._show_error)
+        job.failure.connect(
+            lambda message, current=job: self._job_failed(current, message)
+        )
         job.progress.connect(self._scan_progress)
         job.finished.connect(lambda current=job: self._job_finished(current))
         job.start()
 
-    def _request_query(self, offset: int, limit: int, preserve_anchor: bool) -> None:
+    def _request_query(
+        self, offset: int, limit: int, preserve_anchor: bool, reconcile: bool = False
+    ) -> None:
         """串行化索引读取，只保留最新待处理搜索，丢弃旧版本结果。"""
         if self._closing:
+            return
+        if self._scope != "all" and not self.personal.available:
+            self._show_personal_unavailable()
             return
         params = {
             "query": self._query(),
@@ -386,6 +835,8 @@ class LibraryPage(QtWidgets.QWidget):
             "limit": limit,
             "generation": self._generation,
             "preserve_anchor": preserve_anchor,
+            "personal_path": self.personal_path if self.personal.available else None,
+            "reconcile": reconcile,
         }
         if self._query_busy:
             self._pending_query = params
@@ -393,7 +844,7 @@ class LibraryPage(QtWidgets.QWidget):
         self._query_busy = True
         self._start_job(_LibraryJob("query", self.db_path, self, **params))
 
-    def _reload(self, preserve_anchor: bool = True) -> None:
+    def _reload(self, preserve_anchor: bool = True, *, reconcile: bool = False) -> None:
         """重新读取已加载区间，在数据仍存在时保持可见推文锚点。"""
         self._generation += 1
         count = (
@@ -401,7 +852,7 @@ class LibraryPage(QtWidgets.QWidget):
             if preserve_anchor
             else PAGE_SIZE
         )
-        self._request_query(0, count, preserve_anchor)
+        self._request_query(0, count, preserve_anchor, reconcile)
 
     def _load_more(self) -> None:
         """接近列表底部时增量追加下一页，避免一次载入全库。"""
@@ -421,6 +872,7 @@ class LibraryPage(QtWidgets.QWidget):
             self._reload()
         elif action in ("upsert", "open"):
             if action == "open":
+                self.personal.hydrate(payload.get("states", {}))
                 self._open_detail(payload["work"])
             if self.view.verticalScrollBar().value() <= 24:
                 self._reload()
@@ -428,28 +880,32 @@ class LibraryPage(QtWidgets.QWidget):
                 self.new_banner.show()
         elif payload["generation"] == self._generation:
             self._total = payload["total"]
+            self.personal.hydrate(payload.get("states", {}))
             if payload["offset"]:
                 self.view.append_works(payload["works"])
+            elif payload.get("reconcile"):
+                self.view.sync_works(
+                    payload["works"], preserve_anchor=payload["preserve_anchor"]
+                )
             else:
                 self.view.set_works(
                     payload["works"], preserve_anchor=payload["preserve_anchor"]
                 )
-            self.count_label.setText(f"{self._total:,} 条作品 · 本地离线阅读")
-            self.content.setCurrentWidget(self.view if self._total else self.empty)
-            filtered = bool(
-                self.search.text()
-                or self._kind
-                or self.author.currentData()
-                or self.use_dates.isChecked()
-            )
-            self.empty_title.setText(
-                "没有找到匹配的作品" if filtered else "你的收藏，从这里开始"
-            )
-            self.empty_help.setText(
-                "试试其他关键词，或重置右侧筛选条件。"
-                if filtered
-                else "导入已有下载目录，或下载第一条推文。\n文字、图片和视频将在这里一起呈现。"
-            )
+            for work in payload["works"]:
+                self.view.set_personal_state(
+                    self.personal.state_for(work.key),
+                    self.personal.is_pending(work.key),
+                )
+            if self._scope_anchor is not None:
+                self.view.restore_anchor(self._scope_anchor)
+                self._scope_anchor = None
+            self._update_empty_state()
+            if payload.get("personal_error"):
+                self._personal_query_failed = True
+                self._show_error(f"个人数据读取失败：{payload['personal_error']}")
+            else:
+                self._personal_query_failed = False
+            self._sync_personal_retry()
             if payload.get("authors") is not None:
                 self._update_authors(payload["authors"])
             self._position_player()
@@ -499,7 +955,14 @@ class LibraryPage(QtWidgets.QWidget):
             return
         self._directory_busy = True
         self._start_job(
-            _LibraryJob(action, self.db_path, self, directory=path, root=root)
+            _LibraryJob(
+                action,
+                self.db_path,
+                self,
+                directory=path,
+                root=root,
+                personal_path=self.personal_path if self.personal.available else None,
+            )
         )
 
     def refresh(self) -> None:
@@ -638,6 +1101,11 @@ class LibraryPage(QtWidgets.QWidget):
         self.pause_playback()
         dialog = TweetDetail(work, self)
         dialog.media_requested.connect(self._open_media)
+        dialog.like_requested.connect(self._toggle_like)
+        dialog.bookmark_requested.connect(self._open_bookmark_picker)
+        dialog.set_personal_state(
+            self.personal.state_for(work.key), self.personal.is_pending(work.key)
+        )
         self._show_dialog(dialog)
 
     def _show_dialog(self, dialog: QtWidgets.QDialog) -> None:
@@ -719,11 +1187,18 @@ class LibraryPage(QtWidgets.QWidget):
 
     def _position_player(self) -> None:
         """跟踪活动媒体区域，仅在其完整可见时显示真实视频表面。"""
+        if self._active_media is None:
+            return
+        # 所属作品移除或页面隐藏时，无论视频处于内嵌、弹窗还是全屏均必须暂停。
         if (
-            self._active_media is None
-            or self.player.is_fullscreen()
-            or self._video_dialog is not None
+            self.view.timeline_model.row_for_key(self._active_media[0]) < 0
+            or not self.isVisible()
         ):
+            self.player.pause()
+            if not self.player.is_fullscreen() and self._video_dialog is None:
+                self.player.hide()
+            return
+        if self.player.is_fullscreen() or self._video_dialog is not None:
             return
         rect = self.view.media_rect(*self._active_media)
         viewport = self.view.viewport().rect()
@@ -751,6 +1226,17 @@ class LibraryPage(QtWidgets.QWidget):
         """展示与当前作品关联的显式复制、读取及系统打开操作。"""
         menu = QtWidgets.QMenu(self)
         details = menu.addAction("阅读完整正文")
+        state = self.personal.state_for(work.key)
+        menu.addSeparator()
+        like = menu.addAction("取消喜欢" if state.liked else "喜欢这条作品")
+        like.setEnabled(self.personal.available)
+        bookmark = menu.addAction("整理收藏夹" if state.bookmarked else "加入收藏夹")
+        bookmark.setEnabled(self.personal.available)
+        remove = None
+        if self._folder_id and self._folder_id in state.folder_ids:
+            remove = menu.addAction(f"从【{self.folder_selector.currentText()}】移除")
+        cancel_all = menu.addAction("取消全部收藏") if state.bookmarked else None
+        menu.addSeparator()
         copy = menu.addAction("复制正文")
         link = menu.addAction("复制原帖链接")
         original = menu.addAction("在浏览器中打开原帖")
@@ -759,6 +1245,17 @@ class LibraryPage(QtWidgets.QWidget):
         action = menu.exec(position)
         if action == details:
             self._open_detail(work)
+        elif action == like:
+            self._toggle_like(work)
+        elif action == bookmark:
+            self._open_bookmark_picker(work)
+        elif remove is not None and action == remove:
+            self.personal.set_folders(
+                work.key,
+                tuple(key for key in state.folder_ids if key != self._folder_id),
+            )
+        elif cancel_all is not None and action == cancel_all:
+            self.personal.set_folders(work.key, ())
         elif action == copy:
             QtWidgets.QApplication.clipboard().setText(
                 "\n\n".join((work.text, *work.article_blocks)).strip()
@@ -819,6 +1316,7 @@ class LibraryPage(QtWidgets.QWidget):
         """停止并等待页面拥有的有界工作，防止运行中销毁线程。"""
         self._closing = True
         self.search_timer.stop()
+        self.personal_timer.stop()
         self._pending_query = None
         self._pending_open = None
         self._pending_upserts.clear()
@@ -831,5 +1329,12 @@ class LibraryPage(QtWidgets.QWidget):
             job.requestInterruption()
         for job in self._jobs:
             job.wait()
+        if not self.personal.shutdown():
+            self._closing = False
+            self._sync_personal_retry()
+            self._show_error(
+                "部分个人操作未保存，请重试后关闭。作品文件与已确认记录已保留。"
+            )
+            return False
         self.thumbnails.close()
         return True

@@ -8,12 +8,14 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .models import LibraryQuery, LibraryWork, LocalMedia
+from .models import LibraryQuery, LibraryWork, LocalMedia, PersonalWorkState
+from .personal_state import DEFAULT_FOLDER_ID, PERSONAL_SCHEMA_VERSION, read_states
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 2  # 索引结构及相对路径存储版本；升级不修改原始下载文件。
@@ -149,11 +151,15 @@ def _deserialize_work(payload: str) -> LibraryWork:
 class LibraryRepository:
     """在创建它的线程中管理一个 SQLite 连接。"""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self, db_path: str | Path, personal_path: str | Path | None = None
+    ) -> None:
         """打开索引；确定的损坏数据库先保留备份再重建。"""
         self.path = Path(db_path)  # 当前用户可写的索引文件位置。
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection: sqlite3.Connection | None = None  # 仅供所属线程访问的连接。
+        self.personal_error: str = ""  # 个人库不可用原因，不能伪装为没有喜欢或收藏。
+        self._personal_attached: bool = False  # 是否已只读附加经过版本校验的个人库。
         with _INITIALIZATION_LOCK:
             try:
                 self._open()
@@ -174,9 +180,58 @@ class LibraryRepository:
                         sidecar.replace(Path(f"{backup}{suffix}"))
                 self._open()
 
+        # 个人库不属于可重建缓存，附加和校验必须在上方损坏恢复边界之外。
+        if personal_path is not None:
+            self._attach_personal(Path(personal_path))
+
+    def _attach_personal(self, path: Path) -> None:
+        """只读附加独立个人数据，失败时保留主作品库及个人原库。"""
+        connection = self._db()
+        attached = False
+        try:
+            uri = path.absolute().as_uri() + "?mode=ro"
+            connection.execute("ATTACH DATABASE ? AS personal", (uri,))
+            attached = True
+            version = int(
+                connection.execute("PRAGMA personal.user_version").fetchone()[0]
+            )
+            if version != PERSONAL_SCHEMA_VERSION:
+                raise RuntimeError("个人数据版本不受支持，请使用对应版本应用打开")
+            connection.execute(
+                "SELECT work_key,liked_at,collected_at,revision FROM personal.work_state LIMIT 0"
+            )
+            connection.execute(
+                "SELECT folder_id,work_key,added_at FROM personal.folder_items LIMIT 0"
+            )
+            default = connection.execute(
+                "SELECT is_system FROM personal.folders WHERE id=?",
+                (DEFAULT_FOLDER_ID,),
+            ).fetchone()
+            if default is None or int(default[0]) != 1:
+                raise RuntimeError("个人数据中的默认收藏夹无效")
+            self._personal_attached = True
+        except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
+            self.personal_error = f"个人数据不可用，原库已保留：{exc}"
+            logger.error("%s", self.personal_error)
+            if attached:
+                try:
+                    connection.execute("DETACH DATABASE personal")
+                except sqlite3.Error:
+                    logger.warning("无法释放不可用的个人库附加连接，将随作业关闭")
+
+    def _require_personal(self) -> None:
+        """个人筛选必须使用有效个人库，不能返回误导性的空列表。"""
+        if not self._personal_attached:
+            raise RuntimeError(self.personal_error or "个人数据库尚未就绪，请稍后重试")
+
+    def personal_states(self, keys: Iterable[str]) -> dict[str, PersonalWorkState]:
+        """批量水合作品个人状态，不对每个可见行单独查询。"""
+        self._require_personal()
+        return read_states(self._db(), keys, "personal")
+
     def _open(self) -> None:
         """初始化连接、写前日志和筛选排序所需的数据结构。"""
-        connection = sqlite3.connect(self.path, timeout=SQLITE_TIMEOUT)
+        connection = sqlite3.connect(self.path, timeout=SQLITE_TIMEOUT, uri=True)
         self._connection = connection
         connection.row_factory = sqlite3.Row
         deadline = time.monotonic() + SQLITE_TIMEOUT
@@ -352,6 +407,35 @@ class LibraryRepository:
         query = query or LibraryQuery()
         conditions: list[str] = []
         parameters: list[Any] = []
+        if query.scope not in ("all", "liked", "bookmarked"):
+            raise ValueError("作品列表范围无效")
+        if query.folder_id and query.scope != "bookmarked":
+            raise ValueError("只能在收藏列表内选择收藏夹")
+        if query.scope != "all":
+            self._require_personal()
+            if query.scope == "liked":
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM personal.work_state AS ps "
+                    "WHERE ps.work_key=library_works.key AND ps.liked_at IS NOT NULL)"
+                )
+            else:
+                membership = "fi.work_key=library_works.key"
+                if query.folder_id:
+                    folder = (
+                        self._db()
+                        .execute(
+                            "SELECT 1 FROM personal.folders WHERE id=?",
+                            (query.folder_id,),
+                        )
+                        .fetchone()
+                    )
+                    if folder is None:
+                        raise ValueError("收藏夹已不存在，请刷新后重新选择")
+                    membership += " AND fi.folder_id=?"
+                    parameters.append(query.folder_id)
+                conditions.append(
+                    f"EXISTS (SELECT 1 FROM personal.folder_items AS fi WHERE {membership})"
+                )
         if query.search.strip():
             value = (
                 query.search.strip()
@@ -383,17 +467,52 @@ class LibraryRepository:
                 parameters.append(normalized)
         return (" WHERE " + " AND ".join(conditions) if conditions else ""), parameters
 
+    def _order(self, query: LibraryQuery | None) -> tuple[str, list[Any]]:
+        """构造固定排序表达式，收藏夹范围只绑定稳定标识而不拼接用户输入。"""
+        query = query or LibraryQuery()
+        if query.sort == "recent" and query.scope == "liked":
+            return (
+                (
+                    "(SELECT liked_at FROM personal.work_state AS ps "
+                    "WHERE ps.work_key=library_works.key) DESC, key ASC"
+                ),
+                [],
+            )
+        if query.sort == "recent" and query.scope == "bookmarked":
+            if query.folder_id:
+                return (
+                    (
+                        "(SELECT added_at FROM personal.folder_items AS fi "
+                        "WHERE fi.work_key=library_works.key AND fi.folder_id=?) DESC, key ASC"
+                    ),
+                    [query.folder_id],
+                )
+            return (
+                (
+                    "(SELECT collected_at FROM personal.work_state AS ps "
+                    "WHERE ps.work_key=library_works.key) DESC, key ASC"
+                ),
+                [],
+            )
+        direction = "ASC" if query.sort == "oldest" else "DESC"
+        return f"sort_at {direction}, key ASC", []
+
     def query(
         self, query: LibraryQuery | None = None, offset: int = 0, limit: int = 80
     ) -> list[LibraryWork]:
         """分页读取作品实体，单条损坏的缓存不会阻止其他作品显示。"""
         where, parameters = self._where(query)
-        direction = "ASC" if query is not None and query.sort == "oldest" else "DESC"
+        order, order_parameters = self._order(query)
         rows = (
             self._db()
             .execute(
-                f"SELECT key, payload FROM library_works{where} ORDER BY sort_at {direction}, key ASC LIMIT ? OFFSET ?",
-                [*parameters, max(1, min(int(limit), 10000)), max(0, int(offset))],
+                f"SELECT key, payload FROM library_works{where} ORDER BY {order} LIMIT ? OFFSET ?",
+                [
+                    *parameters,
+                    *order_parameters,
+                    max(1, min(int(limit), 10000)),
+                    max(0, int(offset)),
+                ],
             )
             .fetchall()
         )
