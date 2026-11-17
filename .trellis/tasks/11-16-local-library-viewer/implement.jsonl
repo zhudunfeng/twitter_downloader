@@ -1,0 +1,5 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/tasks/11-16-local-library-viewer/research/viewer-architecture.md", "reason": "Primary Qt research and timeline contracts"}
+{"file": "twitter_downloader/gui/main.py", "reason": "Existing Widgets shell and completion callbacks"}
+{"file": "twitter_downloader/downloader.py", "reason": "Legacy media naming and metadata writer"}
