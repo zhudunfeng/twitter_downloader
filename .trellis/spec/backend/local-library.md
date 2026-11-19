@@ -127,10 +127,10 @@ publication date. Schema 1 migrates in place; a future schema fails explicitly.
 - Config keys: `output_dir`, `cookies_path`, `library_roots`,
   `window_geometry.width/height`. Defaults and Chinese parameter explanations
   live in `gui/config.py`; saves are atomic.
-- Windows config/catalog/logs: `%APPDATA%/TwitterDownloader`; previews:
-  `%LOCALAPPDATA%/TwitterDownloader/previews`. Missing environment variables use
-  `~/.config` and `~/.cache`. No catalog/cache writes beside installed binaries.
-  No additional product environment key is required by this feature.
+- Config/catalog/personal data/logs default to `<software>/data`; previews use
+  its `previews` subdirectory. GUI downloads default to `<software>/downloads`.
+  Follow [Portable storage](./portable-storage.md) for bootstrap/environment
+  precedence, startup migration and the restart-only directory switch.
 
 ## 4. Validation & Error Matrix
 
@@ -274,10 +274,11 @@ whether a work is bookmarked.
 
 ### 8.3 Contracts
 
-- `PERSONAL_DB_PATH` is `%APPDATA%/TwitterDownloader/personal.sqlite3` with the
-  existing config-directory fallback. It is user data, not a cache. No new
-  environment variable or settings key is introduced. Catalog/preview rebuilds,
-  rescans, and source pruning never remove personal rows.
+- `PERSONAL_DB_PATH` is `<effective-data-dir>/personal.sqlite3`, as resolved by
+  [Portable storage](./portable-storage.md). It is user data, not a cache.
+  Catalog/preview rebuilds, rescans, and source pruning never remove personal
+  rows. Storage relocation copies databases before any controller opens them;
+  it does not change work identities or move original download roots.
 - Work identity remains canonical-root plus relative-directory qualified. Same
   key reimport restores marks; separately rooted copies remain independent.
   Relocation/renaming does not implicitly merge identities or migrate marks.

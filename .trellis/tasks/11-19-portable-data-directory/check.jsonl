@@ -1,0 +1,4 @@
+{"file": ".agents/skills/trellis-finish-work/SKILL.md", "reason": "Finish work checklist"}
+{"file": ".agents/skills/trellis-check/SKILL.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/local-library.md", "reason": "Check path and personal-state durability"}
+{"file": ".trellis/spec/backend/portable-storage.md", "reason": "Validate portable selection and safe migration"}

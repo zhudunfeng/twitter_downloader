@@ -9,3 +9,5 @@ __pycache__
 .cursor
 .opencode
 .build-verification
+/data/
+/storage.json

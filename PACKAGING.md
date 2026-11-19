@@ -15,7 +15,11 @@ Windows 安装程序。除非命令中另有说明，所有命令都应在项目
 
 发布前在目标 Windows 上导入一个离线作品目录，实际检查 JPEG 大图、H.264/AAC MP4 的画面与音轨、进度拖动、全屏返回、切换视频只保留一个音源，以及窄窗口/150%/200% 显示缩放。再检查损坏视频、缺少封面工具、无网络与未设置 cookies 的降级提示。仅运行 `offscreen` 启动检查不能证明实际音视频可用。
 
-索引和缓存写入当前用户应用数据目录，安装目录无需写权限。更新或卸载不应删除用户选定的原始下载目录。此功能不新增 Python 运行时依赖；仍使用 `requirements.txt` 中的 PySide6。
+默认配置、作品索引、喜欢与收藏数据库、日志和预览缓存统一写入 EXE 旁的 `data`，默认下载写入 EXE 旁的 `downloads`。因此便携使用应将完整应用目录放在用户可写的位置；从其他工作目录或快捷方式启动也使用相同位置。此功能不新增 Python 运行时依赖；仍使用 `requirements.txt` 中的 PySide6。
+
+“设置 → 数据目录”可修改位置，保存后重启生效。引导配置为 EXE 旁的 `storage.json`（`data_dir` 支持绝对路径或相对 EXE 目录的路径）；环境变量 `TWITTER_DOWNLOADER_DATA_DIR` 优先级更高，可用于只读安装目录。默认目录不可写或引导配置无效时显示启动错误，不会自动改用 C 盘。安装到 `%ProgramFiles%` 等受保护目录时，应事先通过环境变量指定可写数据目录，并在首次下载前设置可写的下载目录，或者在安装向导选择可写的应用目录。
+
+升级首次启动会将旧 `%APPDATA%\TwitterDownloader` 的持久数据复制至空的新目录，原件保留，预览缓存重新生成。切换到其他已有软件数据的目录不会自动合并。更新、卸载和发布清理都不应删除 `data`、`storage.json`、自定义数据目录或用户原始下载；特别是 `personal.sqlite3` 不能从原始作品重建。备份应先关闭应用。Python、Qt、浏览器和系统自行管理的临时文件不属于本功能迁移范围。
 
 ## 1. 准备构建环境
 
@@ -83,6 +87,9 @@ if ($LASTEXITCODE -ne 0) {
 Set-Location E:\pyprojects\twitter_downloader
 
 $Python = "D:\adunsoftware\python\python3.14.4\python.exe"
+$env:PYTHONDONTWRITEBYTECODE = "1" # 验证期间不生成源码字节码缓存。
+$PreviousTestDataDirectory = $env:TWITTER_DOWNLOADER_DATA_DIR # 验证完成后恢复原来的覆盖配置。
+$env:TWITTER_DOWNLOADER_DATA_DIR = Join-Path (Get-Location) ".build-verification\test-data" # 隔离测试数据，避免修改个人数据库。
 & $Python -m unittest discover -s tests -p 'test*.py' -v
 if ($LASTEXITCODE -ne 0) {
     throw "Unit tests failed"
@@ -100,10 +107,18 @@ if ($LASTEXITCODE -ne 0) {
 & $Python -m twitter_downloader --help
 ```
 
+验证完成后恢复当前会话原有的数据目录覆盖，再启动日常应用：
+
+```powershell
+$env:TWITTER_DOWNLOADER_DATA_DIR = $PreviousTestDataDirectory
+```
+
 ## 4. 构建 PyInstaller 应用
 
 `gui_launcher.py` 是冻结应用的入口文件。它使用绝对导入，确保 PyInstaller
 启动可执行文件时能够稳定解析 GUI 包。
+
+安装脚本只收集根目录的 `TwitterDownloader.exe` 和 `_internal` 运行时，避免将运行后产生的默认或自定义数据目录、下载、`storage.json` 和迁移暂存内容带给其他用户。不要将用户数据放进 `_internal`；制作发布包应使用新构建的干净产物。若以后增加需发布的根目录资源，应明确添加收集项，不要恢复递归打包整个应用目录。
 
 下面的命令会将临时文件统一写入 `.build\windows`，不会与源代码目录中常规的
 `dist` 或 `build` 目录混用：
@@ -173,7 +188,11 @@ $Executable = (Resolve-Path ".build\windows\dist\TwitterDownloader\TwitterDownlo
 ```powershell
 $Executable = (Resolve-Path ".build\windows\dist\TwitterDownloader\TwitterDownloader.exe").Path
 $PreviousQtPlatform = $env:QT_QPA_PLATFORM
+$PreviousDataDirectory = $env:TWITTER_DOWNLOADER_DATA_DIR # 测试完成后恢复原数据目录覆盖。
+$PreviousAppData = $env:APPDATA # 隔离旧版目录探测，避免冒烟测试复制真实用户数据。
 $env:QT_QPA_PLATFORM = "offscreen"
+$env:TWITTER_DOWNLOADER_DATA_DIR = Join-Path (Get-Location) ".build-verification\frozen-data"
+$env:APPDATA = Join-Path (Get-Location) ".build-verification\empty-profile"
 $Process = $null
 
 try {
@@ -188,11 +207,12 @@ finally {
         Stop-Process -Id $Process.Id -Force
     }
     $env:QT_QPA_PLATFORM = $PreviousQtPlatform
+    $env:TWITTER_DOWNLOADER_DATA_DIR = $PreviousDataDirectory
+    $env:APPDATA = $PreviousAppData
 }
 ```
 
-该冒烟测试不会下载推文。要进行端到端测试，请使用真实的推文 URL 和有效的
-Cookie 文件。
+该冒烟测试不会下载推文，数据写入隔离目录。还需从不同的当前工作目录测试无环境覆盖的便携默认值，并检查数据均位于 EXE 旁；迁移测试须使用复制的旧版数据夹，验证多收藏夹记录及原件保留。要进行下载端到端测试，请使用真实的推文 URL 和有效的 Cookie 文件。
 
 ## 6. 构建 Inno Setup 安装程序
 

@@ -4,18 +4,45 @@ import json
 import logging
 import os
 import tempfile
-from pathlib import Path
 from typing import Any
 
+from .storage import (
+    APP_DATA_DIR,
+    CACHE_DIR,
+    DATA_DIR_ENV,
+    DEFAULT_DATA_DIR,
+    DEFAULT_OUTPUT_DIR,
+    SOFTWARE_DIR,
+    STORAGE_CONFIG_PATH,
+    StorageError,
+    configure_data_directory,
+    configured_data_directory,
+    prepare_storage,
+    resolve_output_directory,
+)
+
+__all__ = [
+    "APP_DATA_DIR",
+    "CACHE_DIR",
+    "CONFIG_PATH",
+    "DATA_DIR_ENV",
+    "DEFAULT_DATA_DIR",
+    "DEFAULT_OUTPUT_DIR",
+    "LIBRARY_DB_PATH",
+    "PERSONAL_DB_PATH",
+    "SOFTWARE_DIR",
+    "STORAGE_CONFIG_PATH",
+    "StorageError",
+    "configure_data_directory",
+    "configured_data_directory",
+    "ensure_config_dir",
+    "load_config",
+    "prepare_storage",
+    "resolve_output_directory",
+    "save_config",
+]  # 保留旧版路径导出，并统一提供便携式存储入口。
+
 logger = logging.getLogger(__name__)
-APP_DATA_DIR = (
-    Path(os.environ.get("APPDATA") or Path.home() / ".config") / "TwitterDownloader"
-)  # 用户配置与可重建索引位置。
-CACHE_DIR = (
-    Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache")
-    / "TwitterDownloader"
-    / "previews"
-)  # 可删除的媒体预览缓存。
 CONFIG_PATH = APP_DATA_DIR / "config.json"  # 兼容旧版本的用户偏好文件。
 LIBRARY_DB_PATH = APP_DATA_DIR / "library.sqlite3"  # 可从原始目录重建的作品索引。
 PERSONAL_DB_PATH = (
@@ -24,7 +51,7 @@ PERSONAL_DB_PATH = (
 
 
 def ensure_config_dir() -> None:
-    """创建当前用户可写的配置目录。"""
+    """创建本次进程选定的配置目录，不触发迁移或改变活动路径。"""
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -67,7 +94,7 @@ def save_config(config: dict[str, Any]) -> None:
 def _defaults() -> dict[str, Any]:
     """提供各配置项及其兼容默认值。"""
     return {
-        "output_dir": "downloads",  # 新下载的保存根目录。
+        "output_dir": str(DEFAULT_OUTPUT_DIR),  # GUI 新下载根目录，默认位于软件目录内。
         "cookies_path": "",  # 可选 cookie 文件或 browser=浏览器表达式；离线阅读无需设置。
         "library_roots": [],  # 用户导入的本地根目录，原文件不移动。
         "window_geometry": {"width": 1220, "height": 820},  # 窗口逻辑像素宽高。

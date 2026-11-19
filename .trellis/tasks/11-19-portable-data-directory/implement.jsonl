@@ -1,0 +1,4 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/local-library.md", "reason": "Preserve personal data and worker ownership"}
+{"file": ".trellis/spec/backend/portable-storage.md", "reason": "Portable paths and migration startup contract"}

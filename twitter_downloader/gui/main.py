@@ -14,9 +14,19 @@ from twitter_downloader.utils import is_tweet_url
 from .config import (
     APP_DATA_DIR,
     CACHE_DIR,
+    DATA_DIR_ENV,
+    DEFAULT_DATA_DIR,
+    DEFAULT_OUTPUT_DIR,
     LIBRARY_DB_PATH,
     PERSONAL_DB_PATH,
+    SOFTWARE_DIR,
+    STORAGE_CONFIG_PATH,
+    StorageError,
+    configure_data_directory,
+    configured_data_directory,
     load_config,
+    prepare_storage,
+    resolve_output_directory,
     save_config,
 )
 from .library_page import LibraryPage
@@ -227,8 +237,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return page
 
     def _build_settings(self) -> QtWidgets.QWidget:
-        """集中配置下载位置与可选登录态，解释离线索引位置。"""
+        """配置下载与数据位置，通过滚动容纳紧凑窗口中的路径说明。"""
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         page = QtWidgets.QWidget()
+        scroll.setWidget(page)
+        # 滚动容器默认填充浅色调色板；透明继承主窗口，保持既有深色阅读主题。
+        page.setAutoFillBackground(False)
+        scroll.viewport().setAutoFillBackground(False)
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(30, 26, 30, 24)
         layout.setSpacing(18)
@@ -274,25 +291,57 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("", hint)
         self.verbose_check = QtWidgets.QCheckBox("显示详细下载日志")
         form.addRow("日志", self.verbose_check)
+        self.data_dir_edit = QtWidgets.QLineEdit()
+        self.data_dir_edit.setAccessibleName("软件数据目录，重启后生效")
+        self.data_dir_edit.setPlaceholderText(str(DEFAULT_DATA_DIR))
+        self.data_dir_button = QtWidgets.QPushButton("浏览")
+        self.data_dir_button.setObjectName("secondary")
+        self.data_dir_button.clicked.connect(self._choose_data_dir)
+        self.data_dir_reset = QtWidgets.QPushButton("恢复默认")
+        self.data_dir_reset.setObjectName("secondary")
+        self.data_dir_reset.clicked.connect(self._reset_data_dir)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.data_dir_edit, 1)
+        row.addWidget(self.data_dir_button)
+        row.addWidget(self.data_dir_reset)
+        form.addRow("数据目录", row)
+        self.data_dir_hint = QtWidgets.QLabel()
+        self.data_dir_hint.setTextFormat(QtCore.Qt.PlainText)
+        self.data_dir_hint.setWordWrap(True)
+        self.data_dir_hint.setObjectName("caption")
+        self.data_dir_hint.setAccessibleName("数据目录生效状态")
+        form.addRow("", self.data_dir_hint)
         layout.addWidget(card)
         note = QtWidgets.QLabel(
-            f"作品索引：{LIBRARY_DB_PATH}\n预览缓存：{CACHE_DIR}\n索引与缓存可重建，原始作品文件是内容来源。"
+            f"当前数据目录：{APP_DATA_DIR}\n作品索引：{LIBRARY_DB_PATH}"
+            f"\n喜欢与收藏：{PERSONAL_DB_PATH}\n预览缓存：{CACHE_DIR}"
+            "\n数据目录还包含设置和日志。索引与缓存可重建，喜欢与收藏数据请保留。"
+            "\n空目录首次启用时复制原有数据，旧文件保留；已有软件数据的目录直接使用，不合并或覆盖。"
+            "\n原始下载文件不会随数据目录切换而移动。"
         )
         note.setTextFormat(QtCore.Qt.PlainText)
         note.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         note.setWordWrap(True)
         note.setObjectName("caption")
         layout.addWidget(note)
-        save = QtWidgets.QPushButton("保存设置")
-        save.clicked.connect(self._save_settings)
-        layout.addWidget(save, 0, QtCore.Qt.AlignLeft)
+        self.settings_save = QtWidgets.QPushButton("保存设置")
+        self.settings_save.clicked.connect(self._save_settings)
+        layout.addWidget(self.settings_save, 0, QtCore.Qt.AlignLeft)
         layout.addStretch(1)
-        return page
+        return scroll
 
     def _load_initial_values(self) -> None:
         """恢复下载设置与经过有效范围检查的窗口大小。"""
-        self.output_edit.setText(str(self._config.get("output_dir") or "downloads"))
+        self.output_edit.setText(
+            str(
+                resolve_output_directory(
+                    self._config.get("output_dir") or DEFAULT_OUTPUT_DIR
+                )
+            )
+        )
         self.cookie_edit.setText(str(self._config.get("cookies_path") or ""))
+        self.data_dir_edit.setText(str(configured_data_directory()))
+        self._refresh_storage_hint()
         geometry = self._config.get("window_geometry") or {}
         try:
             width, height = (
@@ -320,7 +369,11 @@ class MainWindow(QtWidgets.QMainWindow):
             dict.fromkeys(
                 [
                     *self._library_roots,
-                    str(Path(self.output_edit.text().strip() or "downloads").resolve()),
+                    str(
+                        resolve_output_directory(
+                            self.output_edit.text().strip() or DEFAULT_OUTPUT_DIR
+                        )
+                    ),
                 ]
             )
         )
@@ -378,26 +431,87 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _persist_config(self) -> bool:
         """原子保存设置，失败时保留本会话内容。"""
-        self._config.update(
-            output_dir=self.output_edit.text().strip() or "downloads",
-            cookies_path=self.cookie_edit.text().strip(),
-            library_roots=self._library_roots,
-            window_geometry={"width": self.width(), "height": self.height()},
-        )
         try:
+            self._config.update(
+                output_dir=str(
+                    resolve_output_directory(
+                        self.output_edit.text().strip() or DEFAULT_OUTPUT_DIR
+                    )
+                ),
+                cookies_path=self.cookie_edit.text().strip(),
+                library_roots=self._library_roots,
+                window_geometry={"width": self.width(), "height": self.height()},
+            )
             save_config(self._config)
             return True
-        except OSError as exc:
+        except (OSError, StorageError) as exc:
             logger.warning("设置保存失败：%s", exc)
             self.status.setText(f"设置暂未保存：{exc}")
             return False
 
     def _save_settings(self) -> None:
-        """保存设置，将新下载位置加入可浏览目录。"""
+        """保存当前设置并登记下次启动的数据目录，运行期不切换数据库。"""
         if self._persist_config():
+            try:
+                target = configured_data_directory()
+                requested = self.data_dir_edit.text().strip()
+                # 环境覆盖时保留只读显示；常规设置只在用户提交新路径时改引导文件。
+                if not self._storage_overridden() and requested != str(target):
+                    target = configure_data_directory(requested)
+                self.data_dir_edit.setText(str(target))
+            except (OSError, ValueError, StorageError) as exc:
+                logger.warning("数据目录设置失败，当前数据位置保持不变：%s", exc)
+                self.data_dir_hint.setText(f"数据目录未保存：{exc}")
+                self.status.setText("下载等设置已保存，数据目录未更新，请检查路径")
+                return
             if self._library is not None:
-                self._library.add_root(self.output_edit.text().strip() or "downloads")
-            self.status.setText("设置已保存")
+                self._library.add_root(
+                    str(
+                        resolve_output_directory(
+                            self.output_edit.text().strip() or DEFAULT_OUTPUT_DIR
+                        )
+                    )
+                )
+            self._refresh_storage_hint()
+            pending = target != APP_DATA_DIR
+            self.status.setText(
+                "设置已保存；数据目录将在重启后切换" if pending else "设置已保存"
+            )
+
+    def _storage_overridden(self) -> bool:
+        """检查数据根目录是否由环境变量覆盖，避免保存一个不会生效的路径。"""
+        import os
+
+        return DATA_DIR_ENV in os.environ
+
+    def _refresh_storage_hint(self) -> None:
+        """显示实际目录与重启边界，并解释环境变量的优先级。"""
+        overridden = self._storage_overridden()
+        for widget in (self.data_dir_edit, self.data_dir_button, self.data_dir_reset):
+            widget.setEnabled(not overridden)
+        if overridden:
+            self.data_dir_hint.setText(
+                f"当前由环境变量 {DATA_DIR_ENV} 指定。修改或移除此变量后重启，才能使用软件内设置。"
+            )
+        else:
+            target = configured_data_directory()
+            self.data_dir_hint.setText(
+                f"已保存，下次启动使用：{target}。当前仍使用：{APP_DATA_DIR}。"
+                if target != APP_DATA_DIR
+                else "默认位于软件目录/data；可输入绝对路径或相对软件目录的路径。保存并重启后生效。"
+            )
+
+    def _choose_data_dir(self) -> None:
+        """选择应用配置、数据库、日志和预览缓存的统一存放根目录。"""
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "选择软件数据目录（重启后生效）", self.data_dir_edit.text()
+        )
+        if path:
+            self.data_dir_edit.setText(path)
+
+    def _reset_data_dir(self) -> None:
+        """仅把输入恢复为软件旁的默认目录，保存前不改变任何文件。"""
+        self.data_dir_edit.setText(str(DEFAULT_DATA_DIR))
 
     def _choose_output_dir(self) -> None:
         """选择后续下载的保存根目录。"""
@@ -412,7 +526,7 @@ class MainWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "选择 Cookie 文件",
-            str(Path.home()),
+            str(SOFTWARE_DIR),
             "文本文件 (*.txt);;所有文件 (*.*)",
         )
         if path:
@@ -428,7 +542,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, "链接无效", "请输入有效的 Twitter / X 推文链接。"
             )
             return
-        output = str(Path(self.output_edit.text().strip() or "downloads").resolve())
+        try:
+            output = str(
+                resolve_output_directory(
+                    self.output_edit.text().strip() or DEFAULT_OUTPUT_DIR
+                )
+            )
+        except StorageError as exc:
+            logger.warning("下载目录无效，未启动任务：%s", exc)
+            self.status.setText(f"下载目录不可用，请在设置中修改：{exc}")
+            return
         self._persist_config()
         self._set_downloading_state(True)
         self._append_log(f"开始下载：{url}")
@@ -535,7 +658,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     str(
                         item.data(QtCore.Qt.UserRole + 1)
                         or self.output_edit.text()
-                        or "downloads"
+                        or DEFAULT_OUTPUT_DIR
                     ),
                 )
 
@@ -579,31 +702,61 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def run() -> int:
-    """启动桌面程序，并在用户配置目录保存轮转业务日志。"""
-    from logging.handlers import RotatingFileHandler
+    """先准备可配置的便携数据目录，再启动日志和桌面窗口。"""
+    from logging.handlers import MemoryHandler, RotatingFileHandler
 
     app = QtWidgets.QApplication(sys.argv)
     ensure_app_metadata(app)
     app.setStyle("Fusion")
     app.setStyleSheet(themed_stylesheet())
+    business_logger = logging.getLogger("twitter_downloader")
+    business_logger.setLevel(logging.INFO)
+    startup_log = MemoryHandler(capacity=128)  # 迁移阶段先缓存日志，成功后写入新位置。
+    business_logger.addHandler(startup_log)
     try:
-        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        # 在任何日志、数据库或缓存创建之前完成迁移，不能把空库误当作有效目标。
+        prepare_storage()
         handler = RotatingFileHandler(
             APP_DATA_DIR / "desktop.log",
-            maxBytes=2 * 1024 * 1024,
-            backupCount=2,
-            encoding="utf-8",
+            maxBytes=2 * 1024 * 1024,  # 每个日志文件最多保留 2 MiB。
+            backupCount=2,  # 额外保留两个轮转日志文件。
+            encoding="utf-8",  # 中文业务日志统一使用 UTF-8。
         )
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
         )
-        logging.getLogger("twitter_downloader").addHandler(handler)
-        logging.getLogger("twitter_downloader").setLevel(logging.INFO)
-    except OSError:
-        pass
-    window = MainWindow()
+        business_logger.addHandler(handler)
+        startup_log.setTarget(handler)
+        startup_log.flush()
+        business_logger.removeHandler(startup_log)
+        logger.info("软件数据目录已启用：%s；预览缓存：%s", APP_DATA_DIR, CACHE_DIR)
+    except (OSError, StorageError) as exc:
+        logger.error("软件数据目录初始化失败：%s", exc)
+        QtWidgets.QMessageBox.critical(
+            None,
+            "软件数据目录不可用",
+            f"{exc}\n\n请检查目录读写权限，或修改引导文件：{STORAGE_CONFIG_PATH}"
+            f"\n也可通过环境变量 {DATA_DIR_ENV} 指定可写目录后重新启动。"
+            "\n本次没有回退到 C 盘用户目录。",
+        )
+        return 1
+    finally:
+        business_logger.removeHandler(startup_log)
+        startup_log.close()
+    try:
+        window = MainWindow()
+    except (OSError, ValueError, StorageError) as exc:
+        logger.error("软件配置加载失败：%s", exc)
+        QtWidgets.QMessageBox.critical(None, "软件配置不可用", str(exc))
+        business_logger.removeHandler(handler)
+        handler.close()
+        return 1
     window.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        business_logger.removeHandler(handler)
+        handler.close()
 
 
 if __name__ == "__main__":

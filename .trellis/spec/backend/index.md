@@ -15,6 +15,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Local Library and Timeline](./local-library.md) | Metadata/catalog schema, path safety, worker ownership, media lifecycle, and verification | Implemented |
+| [Portable Storage](./portable-storage.md) | Software-relative paths, bootstrap priority, restart-only changes and safe legacy migration | Implemented |
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
 | [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
